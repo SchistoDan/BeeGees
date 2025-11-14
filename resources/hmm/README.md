@@ -2,9 +2,10 @@
 
 ## COI-5P
 - Created Sat Mar 28 02:53:28 2020
-- **DETERMINE SOURCE OF HMM**
 - Comprised of 38,243 COI-5P sequences
 - 658bp in length
+### Construction process:
+1. **DETERMINE SOURCE OF HMM**
 
 ## rbcL barcoding region
 - Created Wed Nov 12 13:11:28 2025
