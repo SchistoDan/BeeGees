@@ -30,8 +30,8 @@ log_with_timestamp "Conda environment: $CONDA_DEFAULT_ENV"
 log_with_timestamp "Unlocking Snakemake directory..."
 snakemake --profile "$PROFILE" \
     --snakefile ./workflow/Snakefile \
-	  --configfile "$CONFIG" \
-	  --unlock
+	--configfile "$CONFIG" \
+	--unlock
 
 # Run snakemake workflow with profile
 log_with_timestamp "Starting workflow execution..."
