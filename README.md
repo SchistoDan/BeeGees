@@ -275,18 +275,18 @@ Structural validation (via `structural_validation.py`) evaluates all generated b
 2. Structural analysis: Calculates sequence length, gap distribution (leading/trailing/internal), N base count, and distinguishes 'original' N's (barcode_ambiguous_bases_original, representing quality issues) from processing-introduced N's (barcode_ambiguous_bases, representing all N's in final sequence).
 3. Translation analysis: Evaluates all three reading frames (0, 1 2), translates sequences using specified genetic code, counts stop codons in each frame, and selects the optimal frame with the fewest stop codons.
 4. Quality ranking: Assigns barcode ranks (1-6) based on original N's, stop codons, reading frame validity, and base count (lower = better):
- - Rank 1: Perfect sequences (no original N's, no stop codons, valid frame, ≥500bp)
- - Rank 2: High quality (no original N's, no stop codons, valid frame, 400-499bp)
- - Rank 3: Good quality (no original N's, no stop codons, valid frame, 300-399bp)
- - Rank 4: Acceptable (no original N's, no stop codons, valid frame, 200-299bp)
- - Rank 5: Minimal (no original N's, no stop codons, valid frame, 1-199bp)
- - Rank 6: Problematic (contains original N's or translation issues)
+  - Rank 1: Perfect sequences (no original N's, no stop codons, valid frame, ≥500bp)
+  - Rank 2: High quality (no original N's, no stop codons, valid frame, 400-499bp)
+  - Rank 3: Good quality (no original N's, no stop codons, valid frame, 300-399bp)
+  - Rank 4: Acceptable (no original N's, no stop codons, valid frame, 200-299bp)
+  - Rank 5: Minimal (no original N's, no stop codons, valid frame, 1-199bp)
+  - Rank 6: Problematic (contains original N's or translation issues)
 5. Sequence selection: To be considered structurally validated and proceed to taxonomic validation, sequences mut pass ALL of the following criteria:
- - No original N's ( barcode_ambiguous_bases_original == 0)
- - No stop codons (stop_codons == 0)
- - Sequence is in a valid reading frame (reading_frame >= 0)
- - Sufficient informative nucleotide base content (barcode_base_count > 300bp)
- - Acceptable post-processing sequence 'quality' (barcode_ambiguous_bases < 30% of barcode_base_count)
+  - No original N's ( barcode_ambiguous_bases_original == 0)
+  - No stop codons (stop_codons == 0)
+  - Sequence is in a valid reading frame (reading_frame >= 0)
+  - Sufficient informative nucleotide base content (barcode_base_count > 300bp)
+  - Acceptable post-processing sequence 'quality' (barcode_ambiguous_bases < 30% of barcode_base_count)
 
 
 ## Taxonomic validation
@@ -295,20 +295,20 @@ Taxonomic validation is a two-step process (via `tv_local_blast.py` and `tv_blas
 **Process:**
 1. Local BLASTn search: Perform parallel BLASTn searches against a local database, either created from a multi-FASTA file (using makeblastdb), or using a pre-constructed BLAST database. The e-value threshold is hardcoded to 1e-5. In sequence-specific TSV output files (output format 6), the top 500 BLAST hits are then ordered by percent identity (in descending order). These are then filtered to the top 100 hits and are output to the summary CSV.
 2. Taxonomic assignment validation: Validates BLASTn results against expected taxonomy using hierarchical matching and quality-based filtering to confirm barcode identity.
-   1. Parses local BLASTn summary CSV, expected taxonomic lineage for each sample, BLAST database taxonomy mappings, and structurally validated sequences in FASTA format.
-   2. Filter top 100 BLASTn hits to remove those with percent identity values below the specified threshold (< `min_pident`), as well as hits below a specified minimum aignment length (< `min_length`).
-   3. Assess taxonomy of remaining BLAST hits for each sequence via hierarchical taxonomic (exact string) matching between the BLAST database taxonomy mapping and expected taxonomic lineage. Looks for matches between the expected taxonomy and database taxonomy mapping at family, genus, or species-level (highest rank to consider set with `taxval_rank`). The first (i.e. top) hit with a taxonomy match at any of the allowed ranks is accepted.
-   4. Sequence selection for each sample (Process ID): Among the structurally validated consensus sequences with taxonomy matches, the 'best' sequence is selected based on the following criteria:
-      - Lowest matched_rank (species > genus > family - more specific preferred)
-      - Lowest gaps (alignment quality)
-      - Lowest mismatches (sequence variability)
-      - Highest percent identity (overall sequence similarity)
-      - Lowest e-value (statistical significance)
-      - Highest alignment length (matching hit confidence)
-      - Highest s value (MitoGeneExtractor parameter)
-      - Highest r value (MitoGeneExtractor parameter)
-      - Has "fcleaner" in seq_id (prioritises cleaned consensus sequences)
-   5. Generation of taxonomic validation CSV file
+  1. Parses local BLASTn summary CSV, expected taxonomic lineage for each sample, BLAST database taxonomy mappings, and structurally validated sequences in FASTA format.
+  2. Filter top 100 BLASTn hits to remove those with percent identity values below the specified threshold (< `min_pident`), as well as hits below a specified minimum aignment length (< `min_length`).
+  3. Assess taxonomy of remaining BLAST hits for each sequence via hierarchical taxonomic (exact string) matching between the BLAST database taxonomy mapping and expected taxonomic lineage. Looks for matches between the expected taxonomy and database taxonomy mapping at family, genus, or species-level (highest rank to consider set with `taxval_rank`). The first (i.e. top) hit with a taxonomy match at any of the allowed ranks is accepted.
+  4. Sequence selection for each sample (Process ID): Among the structurally validated consensus sequences with taxonomy matches, the 'best' sequence is selected based on the following criteria:
+     - Lowest matched_rank (species > genus > family - more specific preferred)
+     - Lowest gaps (alignment quality)
+     - Lowest mismatches (sequence variability)
+     - Highest percent identity (overall sequence similarity)
+     - Lowest e-value (statistical significance)
+     - Highest alignment length (matching hit confidence)
+     - Highest s value (MitoGeneExtractor parameter)
+     - Highest r value (MitoGeneExtractor parameter)
+     - Has "fcleaner" in seq_id (prioritises cleaned consensus sequences)
+  5. Generation of taxonomic validation CSV file
 
 ## Final metric integration
 The barcode validation outputs are merged with pre-processing and barcode recovery statistics (via `val_csv_merger.py`) to create the final comprehensive BeeGees output ({run_name}_final_stats.csv), consolidating:
