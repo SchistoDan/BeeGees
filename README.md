@@ -121,7 +121,7 @@ git status
 # Results structure #
 ```
 output_dir/
-├── 01_preprocessing/
+├── **01_preprocessing/**
 │   ├── merge_mode/
 │   │   ├── trimmed_data/
 │   │   │   ├── {sample}_merged.fq                             # Merged paired-end reads
@@ -152,13 +152,13 @@ output_dir/
 │           ├── gzip/                                          # Compression logs per sample
 │           └── final_cleanup_complete.txt
 │
-├── 02_references/                                             # Only if run_gene_fetch = true
+├── **02_references/**                                             # Only if run_gene_fetch = true
 │   ├── protein/
 │   │   └── {sample}.fasta                                     # Protein references for each sample
 │   ├── genbank/                                               # GenBank records (if genbank: true)
 │   └── sequence_references.csv                                # Reference metadata
 │
-├── 03_barcode_recovery/
+├── **03_barcode_recovery/**
 │   ├── merge_mode/
 │   │   ├── alignment/
 │   │   │   └── {sample}_r_{r}_s_{s}_align_{sample}.fas        # MGE alignment files
@@ -240,7 +240,7 @@ output_dir/
 │   ├── {run_name}_BeeGees_stats.csv                              # Combined statistics from both modes
 │   └── {run_name}_all_cons_combined.fasta                     # All consensus sequences from both modes
 │
-├── 04_barcode_validation/
+├── **04_barcode_validation/**
 │   ├── structural/                                            # Only if run_structural_validation = true
 │   │   ├── structural_validation.csv                          # Structural validation results
 │   │   ├── {run_name}_full_sequences.fasta                    # Full sequences passing validation
@@ -259,8 +259,8 @@ output_dir/
 # Validation process
 The BeeGees pipeline contains an optional barcode validation process (see [Workflow](#Workflow) section and [config.yaml](https://github.com/SchistoDan/BeeGees/blob/main/config/config.yaml)) to ensure output barcode quality is maximised through sequential structural and taxonomic validation steos, selecting the best barcode consensus sequences for downstream analyses. 
 - The BeeGees pipeline has the capacity to validate the following barcode markers:
-  - **COI-5P**: Requires [BOLDistilled](https://boldsystems.org/data/boldistilled/) BLASTn COI database and corresponding taxonomy mapping TSV file (*_SEQUENCES.fasta & *_TAXONOMY.tsv files) downloaded via the ['Download Source Data'](https://us-sea-1.linodeobjects.com/boldistilled/source.zip) button.
-  - **rbcL**: Requires [custom reference](https://doi.org/10.6084/m9.figshare.17040680.v5) BLASTn rbcL database and corresponding taxonomy mapping TSV file (*\_dereplicated_\*.fasta & *\_dereplicated_\*.tsv), downloaded [here].(https://figshare.com/ndownloader/files/56104238).
+  - **COI-5P**: Requires the [BOLDistilled](https://boldsystems.org/data/boldistilled/) BLASTn COI database and corresponding taxonomy mapping TSV file (*_SEQUENCES.fasta & *_TAXONOMY.tsv files) downloaded via the ['Download Source Data'](https://us-sea-1.linodeobjects.com/boldistilled/source.zip) button.
+  - **rbcL**: Requires the [custom reference](https://doi.org/10.6084/m9.figshare.17040680.v5) BLASTn rbcL database and corresponding taxonomy mapping TSV file (*\_dereplicated_\*.fasta & *\_dereplicated_\*.tsv), downloaded [here](https://figshare.com/ndownloader/files/56104238).
 
 ## Structural validation
 Structural validation (via `structural_validation.py`) evaluates all generated barcode consensus sequences (from both pre-processing mode and all fasta_cleaner variants) through structural and functional analysis to identify high-quality, protein-coding sequences suitable for taxonomic assignment and species identification. Outputs  a validation CSV containing comprehensive metrics for all sequences, including structural features, translation analysis, and quality ranks, and 'output_barcode_all_passing.fasta' containing ALL barcode sequences that pass the five quality criteria (multiple barcode sequences per process_id may pass)
