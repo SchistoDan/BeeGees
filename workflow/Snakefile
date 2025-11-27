@@ -332,11 +332,14 @@ def get_all_mge_consensus_files(mode):
 
 def get_mge_input_merge(wildcards):
     """Get the right input for merge mode"""
-    return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}_merged_clean.fq")
+    return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged_clean.fastq")
 
 def get_mge_input_concat(wildcards):
     """Get input for concat mode"""
-    return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_concat_trimmed.fq")
+    if downsampling_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_concat_trimmed_downsampled.fastq")
+    else:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_concat_trimmed.fq")
 
 # Set up derived parameters
 hmm_file_path = get_hmm_file_for_target(structural_validation_params["target"]) if run_structural_validation else ""
@@ -482,22 +485,19 @@ if run_gene_fetch:
             fi
             """
 
-
 # ===== PREPROCESSING RULES - MERGE MODE =====
 rule fastp_pe_merge:
     input:
         R1=lambda wildcards: samples[wildcards.sample]["R1"],
         R2=lambda wildcards: samples[wildcards.sample]["R2"]
     output:
-        R1_trimmed=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_R1_trimmed.fq.gz")),
-        R2_trimmed=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_R2_trimmed.fq.gz")),
-        report=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_fastp_report.html"),
-        json=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_fastp_report.json"),
-        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_merged.fq"),
-        unpaired_R1=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}_unpaired_R1.fq")),
-        unpaired_R2=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}_unpaired_R2.fq"))
-    params:
-        reads_to_process=max_reads if downsampling_enabled else 0
+        R1_trimmed=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq.gz")),
+        R2_trimmed=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz")),
+        report=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_fastp_report.html"),
+        json=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_fastp_report.json"),
+        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq"),
+        unpaired_R1=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}/{sample}_unpaired_R1.fastq")),
+        unpaired_R2=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}/{sample}_unpaired_R2.fastq"))
     log:
         out=os.path.join(preprocessing_dir_merge, "logs/fastp/{sample}_fastp.out"),
         err=os.path.join(preprocessing_dir_merge, "logs/fastp/{sample}_fastp.err")
@@ -514,7 +514,6 @@ rule fastp_pe_merge:
         echo "Sample: {wildcards.sample}" >> {log.out}
         echo "Started: $(date)" >> {log.out}
         echo "Input files: {input.R1}, {input.R2}" >> {log.out}
-        echo "Downsampling: --reads_to_process {params.reads_to_process}" >> {log.out}
         echo "Threads: {threads}" >> {log.out}
         echo "=========================================" >> {log.out}
 
@@ -541,7 +540,6 @@ rule fastp_pe_merge:
               --merge --merged_out {output.merged_reads} \\
               --unpaired1 {output.unpaired_R1} \\
               --unpaired2 {output.unpaired_R2} \\
-              --reads_to_process {params.reads_to_process} \\
               -h {output.report} -j {output.json} \\
               >> {log.out} 2>> {log.err}; then
             echo "Fastp completed successfully: $(date)" >> {log.out}
@@ -558,11 +556,44 @@ rule fastp_pe_merge:
         echo "Processing completed: $(date)" >> {log.out}
         """
 
+if downsampling_enabled:
+    rule downsample_merge:
+        input:
+            merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq")
+        output:
+            downsampled=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq"))
+        params:
+            max_reads=config["downsampling"]["max_reads"]
+        log:
+            out=os.path.join(preprocessing_dir_merge, "logs/downsample/{sample}.out"),
+            err=os.path.join(preprocessing_dir_merge, "logs/downsample/{sample}.err")
+        threads: rule_resources["downsample"]["threads"]
+        resources:
+            mem_mb=lambda wildcards, attempt: rule_resources["downsample"]["mem_mb"] * attempt
+        retries: 3
+        shell:
+            """
+            set -euo pipefail
+
+            echo "Downsampling merged reads for {wildcards.sample}" > {log.out}
+            echo "Started: $(date)" >> {log.out}
+            echo "Target reads: {params.max_reads}" >> {log.out}
+
+            reformat.sh in={input.merged_reads} \\
+                        out={output.downsampled} \\
+                        samplereadstarget={params.max_reads} \\
+                        sampleseed=12345 \\
+                        >> {log.out} 2>> {log.err}
+
+            echo "Completed: $(date)" >> {log.out}
+            echo "Output file size: $(numfmt --to=iec $(stat -c%s {output.downsampled}))" >> {log.out}
+            """
+
 rule clean_headers_merge:
     input:
-        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_merged.fq")
+        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq") if downsampling_enabled else os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq")
     output:
-        clean_merged=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}_merged_clean.fq"))
+        clean_merged=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_clean.fastq"))
     log:
         out=temp(os.path.join(preprocessing_dir_merge, "logs/clean_headers/{sample}.out")),
         err=temp(os.path.join(preprocessing_dir_merge, "logs/clean_headers/{sample}.err"))
@@ -631,8 +662,6 @@ rule fastp_pe_concat:
         R2_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq"),
         report=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_fastp_report.html"),
         json=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_fastp_report.json")
-    params:
-        reads_to_process=max_reads if downsampling_enabled else 0
     log:
         out=os.path.join(preprocessing_dir_concat, "logs/fastp/{sample}_fastp.out"),
         err=os.path.join(preprocessing_dir_concat, "logs/fastp/{sample}_fastp.err")
@@ -653,7 +682,6 @@ rule fastp_pe_concat:
         echo "Sample: {wildcards.sample}" >> {log.out}
         echo "Started: $(date)" >> {log.out}
         echo "Input files: {input.R1}, {input.R2}" >> {log.out}
-        echo "Downsampling: --reads_to_process {params.reads_to_process}" >> {log.out}
         echo "Threads: {threads}" >> {log.out}
         echo "=========================================" >> {log.out}
         
@@ -677,7 +705,6 @@ rule fastp_pe_concat:
                  --dedup \\
                  --trim_poly_g \\
                  --thread {threads} \\
-                 --reads_to_process {params.reads_to_process} \\
                  -h {output.report} -j {output.json} \\
                  >> {log.out} 2>> {log.err}; then
             echo "Fastp completed successfully: $(date)" >> {log.out}
@@ -829,6 +856,39 @@ rule quality_trim:
         echo "Completed: $(date)" >> {log.out}
         echo "Output file size: $(numfmt --to=iec $(stat -c%s {output[0]}))" >> {log.out}
         """
+
+if downsampling_enabled:
+    rule downsample_concat:
+        input:
+            concat_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed.fq")
+        output:
+            downsampled=temp(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed_downsampled.fastq"))
+        params:
+            max_reads=config["downsampling"]["max_reads"] * 2  # Multiply by 2 because concat mode has R1+R2 reads
+        log:
+            out=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.out"),
+            err=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.err")
+        threads: rule_resources["downsample"]["threads"]
+        resources:
+            mem_mb=lambda wildcards, attempt: rule_resources["downsample"]["mem_mb"] * attempt
+        retries: 3
+        shell:
+            """
+            set -euo pipefail
+
+            echo "Downsampling concatenated trimmed reads for {wildcards.sample}" > {log.out}
+            echo "Started: $(date)" >> {log.out}
+            echo "Target reads: {params.max_reads} (2x read pairs for concat mode)" >> {log.out}
+
+            reformat.sh in={input.concat_trimmed} \\
+                        out={output.downsampled} \\
+                        samplereadstarget={params.max_reads} \\
+                        sampleseed=12345 \\
+                        >> {log.out} 2>> {log.err}
+
+            echo "Completed: $(date)" >> {log.out}
+            echo "Output file size: $(numfmt --to=iec $(stat -c%s {output.downsampled}))" >> {log.out}
+            """
 
 rule aggregate_trim_galore_logs:
     input:
