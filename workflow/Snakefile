@@ -417,9 +417,10 @@ rule all:
         (os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/metrics/02_taxonomic_validation.csv") if run_taxonomic_validation else []),
        
         # ==== FINAL OUTPUTS ====
-        os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_stats.csv"),
+        os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_metrics.csv"),
         os.path.join(barcode_recovery_dir, f"{run_name}_all_cons_combined.fasta"),
-        (os.path.join(main_output_dir, f"{run_name}_final_stats.csv") if run_structural_validation and run_taxonomic_validation else []),
+        (os.path.join(main_output_dir, f"{run_name}_final_metrics.csv") if run_structural_validation and run_taxonomic_validation else []),
+        (os.path.join(main_output_dir, "05_barcoding_outcome/barcoding_outcome.tsv") if run_structural_validation and run_taxonomic_validation else []),
         os.path.join(preprocessing_dir_concat, "logs/final_cleanup_complete.txt"),
         os.path.join(preprocessing_dir_merge, "logs/final_cleanup_complete.txt"),
 		
@@ -559,7 +560,7 @@ rule fastp_pe_merge:
 if downsampling_enabled:
     rule downsample_merge:
         input:
-            merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq")
+            merged_reads=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq"))
         output:
             downsampled=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq"))
         params:
@@ -593,7 +594,7 @@ rule clean_headers_merge:
     input:
         merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq") if downsampling_enabled else os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq")
     output:
-        clean_merged=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_clean.fastq"))
+        clean_merged=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_clean.fastq")
     log:
         out=temp(os.path.join(preprocessing_dir_merge, "logs/clean_headers/{sample}.out")),
         err=temp(os.path.join(preprocessing_dir_merge, "logs/clean_headers/{sample}.err"))
@@ -825,7 +826,7 @@ rule quality_trim:
     input:
         os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat.fastq")
     output:
-        temp(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed.fq")),
+        concat_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed.fq"),
         report=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat.fastq_trimming_report.txt")
     params:
         outdir=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}"),
@@ -2240,7 +2241,7 @@ if run_taxonomic_validation:
         output:
             taxonomy_csv=os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/metrics/02_taxonomic_validation.csv"),
             barcode_fasta=os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/validated_barcodes.fasta"),
-            final_fasta=os.path.join(main_output_dir, f"{run_name}_final_validated_barcodes.fasta")
+            final_fasta=os.path.join(main_output_dir, f"04_barcode_validation/{run_name}_validated_barcodes.fasta")
         params:
             script=os.path.join(workflow.basedir, "scripts/tv_blast2taxonomy.py"),
             taxval_rank=taxonomic_validation_params.get("taxval_rank", "family"),
@@ -2361,7 +2362,7 @@ rule combine_stats_files:
         merge_stats=os.path.join(barcode_recovery_dir_merge, f"{run_name}_merge-stats.csv"),
         concat_stats=os.path.join(barcode_recovery_dir_concat, f"{run_name}_concat-stats.csv")
     output:
-        combined_stats=os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_stats.csv")
+        combined_stats=os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_metrics.csv")
     params:
         script=os.path.join(workflow.basedir, "scripts/csv_combiner_mge.py")
     threads: 2
@@ -2377,13 +2378,13 @@ rule combine_stats_files:
             --output {output.combined_stats}
         """	
 
-rule val_barcode_recovery_stats_merge:
+rule val_barcode_recovery_metrics_merge:
     input:
         structval=os.path.join(main_output_dir, f"04_barcode_validation/structural/structural_validation.csv"),
         taxval=os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/metrics/02_taxonomic_validation.csv"),
-        beegees_csv=os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_stats.csv")
+        beegees_csv=os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_metrics.csv")
     output:
-        final_stats=os.path.join(main_output_dir, f"{run_name}_final_stats.csv")
+        final_metrics=os.path.join(main_output_dir, f"{run_name}_final_metrics.csv")
     params:
         script=os.path.join(workflow.basedir, "scripts/val_csv_merger.py")
     threads: 1
@@ -2398,9 +2399,35 @@ rule val_barcode_recovery_stats_merge:
             --structval-csv {input.structval} \
             --taxval-csv {input.taxval} \
             --beegees-csv {input.beegees_csv} \
-            --output {output.final_stats}
+            --output {output.final_metrics}
         """	
 
+if run_structural_validation and run_taxonomic_validation:
+    rule barcoding_outcome:
+        input:
+            final_metrics=os.path.join(main_output_dir, f"{run_name}_final_metrics.csv")
+        output:
+            outcome_tsv=os.path.join(main_output_dir, "05_barcoding_outcome/barcoding_outcome.tsv")
+        params:
+            script=os.path.join(workflow.basedir, "scripts/barcoding_outcome.py")
+        log:
+            os.path.join(main_output_dir, "05_barcoding_outcome/barcoding_outcome.log")
+        threads: 1
+        resources:
+            mem_mb=4096
+        retries: 2
+        shell:
+            """
+            set -euo pipefail
+            
+            mkdir -p $(dirname {output.outcome_tsv})
+            
+            python {params.script} \
+                --input {input.final_metrics} \
+                --output {output.outcome_tsv} \
+                --log {log}
+            """
+			
 # Final clean up superfluous files
 rule cleanup_files:
     input:
