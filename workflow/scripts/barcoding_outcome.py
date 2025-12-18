@@ -27,6 +27,48 @@ def setup_logging(log_path: str) -> logging.Logger:
     return logger
 
 
+def load_taxonomy_lookup(taxonomy_path: str, logger: logging.Logger) -> dict:
+    """
+    Load taxonomy CSV and build a lookup dictionary.
+    
+    Args:
+        taxonomy_path: Path to taxonomy CSV file
+        logger: Logger instance
+        
+    Returns:
+        Dictionary mapping Process ID to concatenated taxonomy string
+    """
+    taxonomy_lookup = {}
+    taxonomy_cols = ['phylum', 'class', 'order', 'family', 'genus', 'species']
+    
+    logger.info(f"Reading taxonomy file: {taxonomy_path}")
+    
+    with open(taxonomy_path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        
+        # Check required columns
+        if 'Process ID' not in reader.fieldnames:
+            raise ValueError("Taxonomy CSV must contain 'Process ID' column")
+        
+        for col in taxonomy_cols:
+            if col not in reader.fieldnames:
+                raise ValueError(f"Taxonomy CSV must contain '{col}' column")
+        
+        for row in reader:
+            process_id = row['Process ID'].strip()
+            
+            # Concatenate taxonomy columns with semicolon delimiter
+            # Include empty fields (will result in consecutive semicolons if empty)
+            tax_values = [row.get(col, '').strip() for col in taxonomy_cols]
+            taxonomy_string = ';'.join(tax_values)
+            
+            taxonomy_lookup[process_id] = taxonomy_string
+    
+    logger.info(f"Loaded taxonomy for {len(taxonomy_lookup)} Process IDs")
+    
+    return taxonomy_lookup
+
+
 def determine_outcome(rows: list) -> str:
     """
     Determine barcode outcome based on selected column values.
@@ -75,24 +117,21 @@ def lookup_observed_taxonomy(top_matching_hit: str, obs_taxonomy: str) -> str:
     return 'NA'
 
 
-def get_taxonomy_info(rows: list, outcome: str) -> tuple:
+def get_taxonomy_info(rows: list, outcome: str, taxonomy_lookup: dict, sample_id: str) -> tuple:
     """
     Extract expected_taxonomy and observed_taxonomy for an ID.
     
     Args:
         rows: List of row dictionaries for a single ID
         outcome: The barcode outcome (PASS, PARTIAL, or FAIL)
+        taxonomy_lookup: Dictionary mapping Process ID to taxonomy string
+        sample_id: The sample ID to look up
         
     Returns:
         Tuple of (expected_taxonomy, observed_taxonomy)
     """
-    # expected_taxonomy - get from first row that has a value
-    expected_taxonomy = ''
-    for row in rows:
-        val = row.get('expected_taxonomy', '').strip()
-        if val:
-            expected_taxonomy = val
-            break
+    # expected_taxonomy - always get from taxonomy lookup
+    expected_taxonomy = taxonomy_lookup.get(sample_id, '')
     
     if outcome == 'PASS':
         # Find the row where selected == 'YES'
@@ -128,12 +167,13 @@ def get_taxonomy_info(rows: list, outcome: str) -> tuple:
         return expected_taxonomy, observed_taxonomy
 
 
-def process_csv(input_path: str, logger: logging.Logger) -> list:
+def process_csv(metrics_path: str, taxonomy_lookup: dict, logger: logging.Logger) -> list:
     """
-    Process input CSV and collect data per ID.
+    Process metrics CSV and collect data per ID.
     
     Args:
-        input_path: Path to input CSV file
+        metrics_path: Path to metrics CSV file
+        taxonomy_lookup: Dictionary mapping Process ID to taxonomy string
         logger: Logger instance
         
     Returns:
@@ -142,15 +182,15 @@ def process_csv(input_path: str, logger: logging.Logger) -> list:
     id_rows = {}
     row_count = 0
     
-    logger.info(f"Reading input file: {input_path}")
+    logger.info(f"Reading metrics file: {metrics_path}")
     
-    with open(input_path, 'r', newline='') as f:
+    with open(metrics_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
         
-        required_cols = ['ID', 'selected', 'expected_taxonomy', 'top_matching_hit', 'obs_taxonomy']
+        required_cols = ['ID', 'selected', 'top_matching_hit', 'obs_taxonomy']
         for col in required_cols:
             if col not in reader.fieldnames:
-                raise ValueError(f"Input CSV must contain '{col}' column")
+                raise ValueError(f"metrics CSV must contain '{col}' column")
         
         for row in reader:
             row_count += 1
@@ -164,12 +204,21 @@ def process_csv(input_path: str, logger: logging.Logger) -> list:
     logger.info(f"Processed {row_count} rows")
     logger.info(f"Found {len(id_rows)} unique IDs")
     
+    # Check for IDs not found in taxonomy lookup
+    missing_taxonomy = [sid for sid in id_rows.keys() if sid not in taxonomy_lookup]
+    if missing_taxonomy:
+        logger.warning(f"{len(missing_taxonomy)} IDs not found in taxonomy file")
+        for sid in sorted(missing_taxonomy)[:10]:  # Log first 10
+            logger.warning(f"  Missing taxonomy for: {sid}")
+        if len(missing_taxonomy) > 10:
+            logger.warning(f"  ... and {len(missing_taxonomy) - 10} more")
+    
     # Determine outcomes and taxonomy info
     results = []
     for sample_id in sorted(id_rows.keys()):
         rows = id_rows[sample_id]
         outcome = determine_outcome(rows)
-        expected_tax, observed_tax = get_taxonomy_info(rows, outcome)
+        expected_tax, observed_tax = get_taxonomy_info(rows, outcome, taxonomy_lookup, sample_id)
         results.append((sample_id, outcome, expected_tax, observed_tax))
     
     return results
@@ -206,16 +255,21 @@ def main():
         description="Determine barcode outcomes from CSV based on 'selected' column values."
     )
     parser.add_argument(
-        '-i', '--in', '--input',
-        dest='input',
+        '-m', '--metrics',
+        dest='metrics',
         required=True,
-        help='Input CSV file path'
+        help='metrics CSV file path'
     )
     parser.add_argument(
         '-o', '--out', '--output',
         dest='output',
         required=True,
         help='Output TSV file path'
+    )
+    parser.add_argument(
+        '-t', '--taxonomy',
+        required=True,
+        help='Taxonomy CSV file path (must contain Process ID, phylum, class, order, family, genus, species columns)'
     )
     parser.add_argument(
         '--log',
@@ -228,7 +282,8 @@ def main():
     logger = setup_logging(args.log)
     
     try:
-        results = process_csv(args.input, logger)
+        taxonomy_lookup = load_taxonomy_lookup(args.taxonomy, logger)
+        results = process_csv(args.metrics, taxonomy_lookup, logger)
         write_output(results, args.output, logger)
     except Exception as e:
         logger.error(f"Error: {e}")
