@@ -1,28 +1,48 @@
 # config/config.yaml
 
 ## General BeeGees pipeline parameters and paths
-run_name: "BeeGees_RUN_1"                        # BeeGees run name identifier
-mge_path: "path/to/MitoGeneExtractor"            # Path to MGE installation (MitoGeneExtractor-vX.X.X file)
-samples_file: "path/to/samples.csv"              # Path to samples.csv
-sequence_reference_file: ""                      # Path to sequence_references.csv (leave path blank/empty if 'run_gene_fetch' == true)
-output_dir: "path/to/BeeGees-RUN_1-out"          # Path to main output directory
+# BeeGees run name identifier
+run_name: "run_1"
+# Path to MGE installation (MitoGeneExtractor-vX.X.X file)
+mge_path: "/path/to/apps/MitoGeneExtractor/MitoGeneExtractor-v1.9.6"
+# Path to samples.csv
+samples_file: "/path/to/samples.csv"
+# Path to sequence_references.csv (leave path blank/empty if 'run_gene_fetch' == true)
+sequence_reference_file: ""
+# Path to output directory. Will make final dir if it does not exist already
+output_dir: "/path/to/BeeGees_pipeline_outputs/run_1"
 
-## Gene Fetch parameters (https://github.com/bge-barcoding/gene_fetch), or using `gene-fetch --help`.
-run_gene_fetch: true
+
+
+## Gene Fetch parameters (https://github.com/bge-barcoding/gene_fetch)
+run_gene_fetch: true  # Set true to use gene-fetch to generate reference sequences (default: true)
 gene_fetch:
-   email: "example@example.ac.uk"                # Email for NCBI API
-   api_key: "12345678910"                        # NCBI API key
-   gene: "cox1"                                  # Target gene (e.g., cox1/coi or rbcl)
-   minimum_length: "500"                         # Minimum length of protein reference(s) to fetch (default: 500aa)
-   input_type: "taxid"                           # Type of expected taxonomy provided. 'taxid' OR 'hierarchical' taxonomic lineage
-   genbank: true                                 # Download GenBank records for corresponding pseudo-references
+   email: "example@example.ac.uk"                          # Required: Email for NCBI API
+   api_key: "123456789"                                    # Required: NCBI API key
+   gene: "coi"                                             # Target gene (e.g., cox1, rbcl, matk)
+   type: "both"                                            # Sequence 'type' (e.g. protein, or both (protein+nucleotide)
+   minimum_length: "500"                                   # Minimum length of protein reference(s) to fetch (default: 500aa)
+   input_type: "taxid"                                     # Does the 'samples.csv' contain a 'taxid' column or 'hierarchical' taxonomic information columns (default: taxid)? - see Gene Fetch docs for more detail
+   genbank: true                                           # Download GenBank records for corresponding pseudo-references
+
+
+
+## Contaminant screening parameters (BBDuk)
+contaminant_screen:
+  enabled: true                 # Set to true to enable contaminant screening with BBDuk (default: false)
+  contam_seqs: "/resources/contaminants/contaminants.fasta.gz"               # Path to contaminant reference sequences FASTA file (Default: resources/contaminants/contaminants.fasta.gz)
+  k: 31                         # k-mer size for contaminant matching (default: 31)
+
+
 
 ## Downsampling parameters
 downsampling:
-  enabled: false                                 # Set to true to enable downsampling (default: false)
-  max_reads: 0                                   # Maximum number of read PAIRS to process
+  enabled: false         # Set to true to enable downsampling (default: false)
+  max_reads: 50000000    # Number of reads to subsample. Merge mode: N merged reads (E.g., 50000000 = 50M merged reads), Concat mode: 2xN total reads (E.g., 50000000 = 100M PE reads).
 
-## MitoGeneExtrator parameters
+
+
+## MitoGeneExtractor parameters (see https://github.com/cmayer/MitoGeneExtractor/tree/main?tab=readme-ov-file#command-line-options)
 # Exonerate relative score threshold parameter
 r:
   - 1
@@ -32,91 +52,115 @@ r:
 s:
   - 50
   - 100
-n: 0                                             # Number of bp to extend beyond the Exonerate alignment
-C: 5                                             # Genetic code
-t: 0.5                                           # Consensus threshold
-
-## Post-processing of aligned reads for cleaning (using six supplementary scripts)
-# See the docstring of each script (in workflow/scripts/) for more detailed parameter information
+# Number of bp to extend beyond the Exonerate alignment
+n: 0
+# Genetic code (see https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi). 
+# 1: standard genetic code, 2: Vertebrate Mitochondrial, 5: Invertebrate Mitochondrial, 9: Echinoderm and Flatworm Mitochondrial, 11: Bacterial, Archaeal and Plant Plastid 
+C: 5
+# Consensus threshold (e.g. 0.5 = 50%)
+t: 0.5
+  
+  
+  
+## Post-processing of aligned reads for cleaning and filtering
+# human coi filtering -> at content filtering -> statistical outlier filtering -> (optional) reference-base filtering -> 'cleaned' consensus generation
+# Default parameters
 fasta_cleaner:
-  consensus_threshold: 0.5                       # Threshold at which bases at each position must 'agree' to be incldued in the consensus
-  human_threshold: 0.95                          # Threshold at which reads are removed due to similarity with human COI
-  at_difference: 0.1                             # Threshold at which reads are removed due to AT content variation
-  at_mode: "absolute"                            # At content filtering mode (Absolute/Higher/Lower)
-  outlier_percentile: 90.0                       # Threshold at which reads are flagged as statistical outliers to the consensus and removed
-  reference_dir: null                            # Path to directory containing references for filtering (set to null/none if omitting step)
-  reference_filter_mode: "remove_similar"        # Filter mode: "keep_similar" (remove outliers) or "remove_similar" (remove sequences similar to reference)
+  human_genome: "/resources/contaminants/human_mitogenome.fasta"              # Path to human mitogenome FASTA reference (Default: resources/contaminants/human_mitogenome.fasta)
+  aligner: "bwa-aln"            # Alignment tool for human mitogenome filtering: minimap2, bwa-mem, bwa-aln (default: bwa-aln)
+  save_removed: true           # Save removed (human-mapped) sequences to removed/ subdirectory (default: false)
+  consensus_threshold: 0.5      # Threshold at which bases at each position must 'agree' to be incldued in the consensus (0.5 = ≥50% of bases at each position must agree)
+  at_difference: 0.1            # Threshold at which reads are removed due to AT content variation (0.1 = reads with AT% differing by >10% from the consensus are removed)
+  at_mode: "absolute"           # At content filtering mode: Absolute, Higher, Lower
+  outlier_percentile: 90.0      # Threshold at which reads are flagged as statistical outliers to the consensus and removed (90.0 = reads <90% 'similar' to the consensus are removed)
+  reference_dir: null
+  reference_filter_mode: "remove_similar"    # Filter mode: "keep_similar" (remove outliers) or "remove_similar" (remove sequences similar to reference)
 
+
+  
 ## Structural validation
-run_structural_validation: true                  # Set false to skip structural validation step
+run_structural_validation: true  # Set false to skip structural validation step (default: true)
 structural_validation:
-  target: "cox1"                                 # Options: cox1/coi or rbcl (maps to corresponding HMM)
-  verbose: false                                 # Enable verbose logging
-  genetic_code: 5                                # Genetic code table for translation
+  target: "coi"                 # Options: cox1/coi, rbcl, matk (maps to corresponding HMM models)
+  verbose: true                 # Enable verbose logging (default: false)
+  genetic_code: 5               # Genetic code table for translation (default: 1 for standard code)
+
+
 
 ## Taxonomic validation
-run_taxonomic_validation: true                   # If run_structural_validation == false, run_taxonomic_validation MUST also be false
+run_taxonomic_validation: true  # If run_structural_validation == false, run_taxonomic_validation MUST also == false (default: true)
 taxonomic_validation:
-    database: "/BLAST_database/"                 # Path to directory containing BLASTn database files or fasta
-    taxval_rank: "family"                        # Taxonomic rank for validation (phylum, class, order, family, genus, species) (default & recommended: family)
-    database_taxonomy: "/*_taxonomy.tsv"         # Path to TSV file containing taxnonmic mapping associated with records in provided BLASTn database
-    expected_taxonomy: "samples.csv"             # Path to CSV file containing hierarchical taxonomic lineage information for each sample
-    verbose: true                                # Enable verbose logging
-    min_pident: 80                               # Minimum percent identity (pident) threshold to be considered
-    min_length: 100                              # Minimum length of BLASTn alignment to be considered
+    # Path to directory containing BLASTn DB, or to a specific FASTA file to make a BLAST DB from (using makeblastdb)
+    database: "/path/to/databases/BOLDistilled/"   
+    # Path to taxonomic lineages associated with specified BLASTn DB
+    database_taxonomy: "/path/to/databases/BOLDistilled/BOLDistilled_taxonomy/source/BOLDistilled_COI_*_TAXONOMY.tsv"
+    taxval_rank: "family"   # Taxonomic rank for validation (phylum, class, order, family, genus, species) (default & recommended: family)
+    # Expected taxonomy file must contain the following columns: ID,phylum,class,order,family,genus,speces. ID must equal 'ID' from samples_file above
+    expected_taxonomy: "/path/to/expected_taxonomic_lineages.csv"
+    verbose: true       # Enable verbose logging (default: true)
+    min_pident: 80      # Minimum percent identity (pident) threshold to be considered for returned BLAST hits
+    min_length: 100     # Minimum length of alignment to be considered
+
+
 
 ## Resource allocation for each rule. Memory shown in Mb (mem_mb), e.g. 2048 = 2G memory. Rules have dynamic memory scaling upon retry (mem_mb * retry #).
 rules:
-  gene_fetch:                                    # Gene Fetch
+  gene_fetch:                           # Gene Fetch
     mem_mb: 8192
-    threads: 4  
-  fastp_qc:                                      # Fastp (merge and concat modes)
-    mem_mb: 16384
-    threads: 4
-  clean_headers_merge:                           # Clean fastq headers (merge mdoe)
-    mem_mb: 16384
-    threads: 4
-  fastq_concat:                                  # Concatentaiton of fastp QC'd fastq files (concat mode)
-    mem_mb: 16384
-    threads: 4
-  gzip_trimmed:                                  # Compression of fastp QC'd PE fastq files (concat mode)
+    threads: 4 
+    partition: PARTITION
+  contaminant_screen:                   # BBDuk contaminant screening (merge and concat modes)
+    mem_mb: 65536
+    threads: 16
+    partition: PARTITION
+  downsample:                           # Downsample QC'd reads (concat & merge modes)
     mem_mb: 8192
-  quality_trim:                                  # Trim Galore (concat mode)
+    threads: 4
+  fastp_qc:                             # Fastp (merge and concat modes)
     mem_mb: 16384
     threads: 4
-  MitoGeneExtractor:                             # MitoGeneExtractor (concat and merge mode)
+  clean_headers_merge:                  # Clean fastq headers (merge mdoe)
+    mem_mb: 16384
+    threads: 4
+  fastq_concat:                         # Concatenation of fastp QC'd fastq files (concat mode)
+    mem_mb: 16384
+    threads: 4
+  quality_trim:                         # Trim Galore (concat mode)
+    mem_mb: 16384
+    threads: 4
+  MitoGeneExtractor:                    # MitoGeneExtractor (concat and merge mode)
     mem_mb: 32768
     threads: 8
     partition: PARTITION
-  rename_and_combine_cons:                       # Clean and rename fasta headers
+  rename_and_combine_cons:              # Clean and rename fasta headers
     mem_mb: 8192
     threads: 4
-  human_cox1_filter:                             # 01_human_cox1_filter.py
+  human_mitogenome_filter:              # human_mitogenome_filter.py
+    mem_mb: 32768
+    threads: 32                         # threads = parallel_files × 4 threads-per-file (e.g., 32 threads = 8 parallel files × 4 aligner threads each)
+  at_content_filter:                    # 02_at_content_filter.py
     mem_mb: 32768
     threads: 8
-  at_content_filter:                             # 02_at_content_filter.py
+  statistical_outlier_filter:           # 03_statistical_outlier.py
     mem_mb: 32768
     threads: 8
-  statistical_outlier_filter:                    # 03_statistical_outlier.py
-    mem_mb: 32768
-    threads: 8
-  reference_filter:                              # 04_reference_filter.py
+  reference_filter:                     # 04_reference_filter.py
     mem_mb: 4096
     threads: 1
-  consensus_generation:                          # 05_consensus_generator.py
+  consensus_generation:                 # 05_consensus_generator.py
     mem_mb: 8192
     threads: 4
-  extract_stats_to_csv:                          # mge_stats.py
+  extract_stats_to_csv:                 # mge_stats.py
     mem_mb: 16384
     threads: 4
-  structural_validation:                         # structural_validation.py
+  structural_validation:                # structural_validation.py
     mem_mb: 16384
     threads: 16
     partition: PARTITION
-  taxonomic_validation:                          # tv_local blast.py
+  taxonomic_validation:                 # tv_local blast.py
     mem_mb: 51200
-    threads: 32                                  # Minimum = 4 (4 threads given to each parallised BLASTn run)
+    threads: 32                         # Minimum = 4 (4 threads given to each parallised BLASTn instance)
     partition: PARTITION
-  blast2taxonomy:                                # tv_blast2taxonomy.py
+  blast2taxonomy:                       # tv_blast2taxonomy.py
     mem_mb: 16384
     threads: 4

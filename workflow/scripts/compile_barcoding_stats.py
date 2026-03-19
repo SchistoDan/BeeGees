@@ -25,6 +25,8 @@ Arguments:
         Path to multi-FASTA file containing pre-cleaning sequences for header extraction
     --post-fasta : str (optional)
         Path to multi-FASTA file containing post-cleaning sequences for header extraction
+    --contaminant-stats : str (optional)
+        Path to contaminant_screen directory containing per-sample contaminant stats files
     --clean : flag (optional)
         Remove all rows where fasta_header == 'null' from the output
 
@@ -45,6 +47,8 @@ The script generates the following metrics for each sample:
     - ref_accession: Protein accession number from reference sequences  
     - ref_rank: Matched taxonomic rank from reference sequences
     - n_reads_in: Number of input sequences (from .out file)
+    - n_contam_reads_removed: Number of contaminant reads matched/removed
+    - pct_contam_removed: Percentage of reads identified as contaminants
     - n_reads_aligned: Number of aligned sequences (merged: FASTA alignment count or cleaning kept_reads)
     - n_reads_skipped: Number of sequences that were successfully aligned but not in the FASTA file
     - ref_length: Length of alignment (from .out file)
@@ -233,6 +237,88 @@ def parse_fasta_headers(fasta_file_path):
         logger.error(f"Error parsing FASTA headers from {fasta_file_path}: {e}")
     
     return header_lookup
+
+def parse_contaminant_stats(contaminant_stats_dir):
+    """
+    Parse contaminant screening statistics from BBDuk output files.
+    
+    Expects directory structure: {contaminant_stats_dir}/{sample_id}/{sample_id}_contaminant_stats.txt
+    
+    Each stats file has lines like:
+        #Total	3621344
+        #Matched	114495	3.16167%
+    
+    Returns a dictionary mapping sample_id -> {
+        'n_contam_reads_removed': int,
+        'pct_contam_removed': float
+    }
+    """
+    contaminant_data = {}
+    
+    if not contaminant_stats_dir or not os.path.exists(contaminant_stats_dir):
+        logger.info(f"Contaminant stats directory not provided or does not exist: {contaminant_stats_dir}")
+        return contaminant_data
+    
+    # Find all contaminant stats files
+    stats_files = glob.glob(os.path.join(contaminant_stats_dir, "*", "*_contaminant_stats.txt"))
+    
+    if not stats_files:
+        logger.warning(f"No contaminant stats files found in: {contaminant_stats_dir}")
+        return contaminant_data
+    
+    logger.info(f"Found {len(stats_files)} contaminant stats files in: {contaminant_stats_dir}")
+    
+    for stats_file in stats_files:
+        try:
+            # Extract sample ID from directory name
+            sample_id = os.path.basename(os.path.dirname(stats_file))
+            
+            n_reads_total = None
+            n_contam_reads_removed = None
+            pct_contam_removed = None
+            
+            with open(stats_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    
+                    # Parse #Total line: "#Total\t3621344"
+                    if line.startswith('#Total\t'):
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            try:
+                                n_reads_total = int(parts[1])
+                            except ValueError:
+                                logger.warning(f"Could not parse #Total value in {stats_file}: {parts[1]}")
+                    
+                    # Parse #Matched line: "#Matched\t114495\t3.16167%"
+                    elif line.startswith('#Matched\t'):
+                        parts = line.split('\t')
+                        if len(parts) >= 3:
+                            try:
+                                n_contam_reads_removed = int(parts[1])
+                            except ValueError:
+                                logger.warning(f"Could not parse #Matched count in {stats_file}: {parts[1]}")
+                            try:
+                                # Remove the '%' suffix
+                                pct_contam_removed = float(parts[2].rstrip('%'))
+                            except ValueError:
+                                logger.warning(f"Could not parse #Matched percentage in {stats_file}: {parts[2]}")
+            
+            if n_reads_total is not None:
+                contaminant_data[sample_id] = {
+                    'n_contam_reads_removed': n_contam_reads_removed if n_contam_reads_removed is not None else 'null',
+                    'pct_contam_removed': round(pct_contam_removed, 5) if pct_contam_removed is not None else 'null'
+                }
+                logger.debug(f"Parsed contaminant stats for {sample_id}: total={n_reads_total}, "
+                           f"matched={n_contam_reads_removed}, pct={pct_contam_removed}")
+            else:
+                logger.warning(f"Could not parse #Total from contaminant stats file: {stats_file}")
+                
+        except Exception as e:
+            logger.error(f"Error reading contaminant stats file {stats_file}: {e}")
+    
+    logger.info(f"Parsed contaminant stats for {len(contaminant_data)} samples")
+    return contaminant_data
 
 def parse_out_file(out_file_path):
     """Parse the .out file for additional statistics."""
@@ -455,7 +541,8 @@ def process_fasta_file(file_path):
         'cov_med': round(median_coverage, 2),
     }
 
-def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_seqs_csv=None, pre_fasta=None, post_fasta=None, clean_null_headers=False):
+def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_seqs_csv=None,
+                    pre_fasta=None, post_fasta=None, clean_null_headers=False, contaminant_stats_dir=None):
     """Summarise FASTA files based on log file with cleaning statistics from CSV and auto-detect merge mode."""
     
     # Auto-detect merge mode from file paths
@@ -496,7 +583,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
     logger.info(f"Sample base IDs found: {', '.join(set(base_ids))}")
     logger.info(f"Total number of samples being processed: {len(file_paths)}")
 
-    # Parse FASTA headers if provided - NEW LOGIC
+    # Parse FASTA headers if provided
     fasta_headers_lookup = {}
     if pre_fasta:
         logger.info(f"Parsing pre-fasta headers from: {pre_fasta}")
@@ -522,6 +609,13 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
         logger.info("Clean mode enabled: rows with fasta_header == 'null' will be excluded from output")
     else:
         logger.info("Clean mode disabled: all rows will be included in output")
+
+    # Parse contaminant screening stats
+    contaminant_data = parse_contaminant_stats(contaminant_stats_dir)
+    if contaminant_data:
+        logger.info(f"Contaminant stats loaded for {len(contaminant_data)} samples from: {contaminant_stats_dir}")
+    else:
+        logger.info("No contaminant stats available - columns will be set to 'null'")
 
     # Get alignment stats from .out files
     out_files = [f for f in os.listdir(out_file_dir) if f.endswith('.out')]
@@ -549,12 +643,13 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
     else:
         logger.warning(f"Reference sequences CSV file not provided or does not exist")
 
-    # Updated fieldnames with fasta_header column added after mge_params
+    # Updated fieldnames with contaminant screening columns between n_reads_in and n_reads_aligned
     fieldnames = [
         'Filename', 'ID', 'mge_params', 'fasta_header', 'sample_taxid', 'ref_accession', 'ref_rank',
-        'n_reads_in', 'n_reads_aligned', 'n_reads_skipped', 'ref_length', 
+        'n_reads_in', 'n_contam_reads_removed', 'pct_contam_removed',
+        'n_reads_aligned', 'n_reads_skipped', 'ref_length',
         'cov_min', 'cov_max', 'cov_avg', 'cov_med',
-        'cleaning_removed_human', 'cleaning_removed_at', 'cleaning_removed_outlier', 
+        'cleaning_removed_human', 'cleaning_removed_at', 'cleaning_removed_outlier',
         'cleaning_removed_reference', 'cleaning_ambig_bases', 'cleaning_cov_percent'
     ]
 
@@ -590,7 +685,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
                     if params and not params.endswith('_merge'):
                         result['mge_params'] = f"{params}_merge"
 
-                # NEW LOGIC: Look up FASTA header using (ID, mge_params) combination
+                # Look up FASTA header using (ID, mge_params) combination
                 lookup_key = (base_id, result['mge_params'])
                 result['fasta_header'] = fasta_headers_lookup.get(lookup_key, 'null')
                 logger.debug(f"Looking up header for {lookup_key}: {result['fasta_header']}")
@@ -608,6 +703,12 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
                     result['n_reads_skipped'] = max(0, successful_aligned - n_reads_aligned)
                 else:
                     result['n_reads_skipped'] = 'null'
+
+                # Add contaminant screening stats based on sample ID
+                # The contaminant_stats_dir is already mode-specific (passed per rule invocation)
+                contam_stats = contaminant_data.get(base_id, {})
+                result['n_contam_reads_removed'] = contam_stats.get('n_contam_reads_removed', 'null')
+                result['pct_contam_removed'] = contam_stats.get('pct_contam_removed', 'null')
 
                 # Set all cleaning columns to "null" for FASTA-derived rows
                 result['cleaning_removed_human'] = 'null'
@@ -669,7 +770,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
                 if mge_params and not mge_params.endswith('_merge'):
                     cleaning_result['mge_params'] = f"{mge_params}_merge"
 
-            # NEW LOGIC: Look up FASTA header using (ID, mge_params) combination
+            # Look up FASTA header using (ID, mge_params) combination
             lookup_key = (base_id, cleaning_result['mge_params'])
             cleaning_result['fasta_header'] = fasta_headers_lookup.get(lookup_key, 'null')
             logger.debug(f"Looking up header for {lookup_key}: {cleaning_result['fasta_header']}")
@@ -678,6 +779,12 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
             cleaning_result['n_reads_in'] = 'null'
             cleaning_result['n_reads_skipped'] = 'null'
             cleaning_result['ref_length'] = 'null'
+
+            # Add contaminant screening stats based on sample ID
+            # The contaminant_stats_dir is already mode-specific (passed per rule invocation)
+            contam_stats = contaminant_data.get(base_id, {})
+            cleaning_result['n_contam_reads_removed'] = contam_stats.get('n_contam_reads_removed', 'null')
+            cleaning_result['pct_contam_removed'] = contam_stats.get('pct_contam_removed', 'null')
 
             # MERGED COLUMNS: Use cleaning values in the merged column names
             # cleaning_kept_reads -> n_reads_aligned
@@ -727,6 +834,7 @@ if __name__ == "__main__":
     parser.add_argument('--ref_seqs', type=str, help='Path to CSV file containing reference sequence information (taxid, accession, rank)')
     parser.add_argument('--pre-fasta', type=str, help='Path to multi-FASTA file containing pre-cleaning sequences for header extraction')
     parser.add_argument('--post-fasta', type=str, help='Path to multi-FASTA file containing post-cleaning sequences for header extraction')
+    parser.add_argument('--contaminant-stats', type=str, help='Path to contaminant_screen directory containing per-sample contaminant stats files')
     parser.add_argument('--clean', action='store_true', help='Remove all rows where fasta_header == null from the output')
 
     args = parser.parse_args()
@@ -743,5 +851,9 @@ if __name__ == "__main__":
         parser.error(f"The pre-fasta file '{getattr(args, 'pre_fasta')}' does not exist.")
     if getattr(args, 'post_fasta') and not os.path.isfile(getattr(args, 'post_fasta')):
         parser.error(f"The post-fasta file '{getattr(args, 'post_fasta')}' does not exist.")
+    if args.contaminant_stats and not os.path.isdir(args.contaminant_stats):
+        parser.error(f"The contaminant stats directory '{args.contaminant_stats}' does not exist or is not a directory.")
 
-    summarise_fasta(args.alignment_log, args.output, args.out_file_dir, args.cleaning_csv, args.ref_seqs, getattr(args, 'pre_fasta', None), getattr(args, 'post_fasta', None), args.clean)
+    summarise_fasta(args.alignment_log, args.output, args.out_file_dir, args.cleaning_csv, args.ref_seqs,
+                    getattr(args, 'pre_fasta', None), getattr(args, 'post_fasta', None), args.clean,
+                    getattr(args, 'contaminant_stats', None))

@@ -51,20 +51,26 @@ def validate_gene_fetch_config(config):
     
     if run_gene_fetch:
         gene_fetch_config = config.get("gene_fetch", {})
-        required_gene_fetch_keys = ['email', 'api_key', 'gene', 'input_type', 'minimum_length']
+        required_gene_fetch_keys = ['email', 'api_key', 'gene', 'input_type', 'type', 'minimum_length']
         missing_gene_fetch_keys = [key for key in required_gene_fetch_keys 
                                  if key not in gene_fetch_config or not gene_fetch_config[key]]
-        
+
         if missing_gene_fetch_keys:
             sys.stderr.write(f"WARNING: Missing required gene_fetch configuration parameters: {', '.join(missing_gene_fetch_keys)}\n")
             sys.exit(1)
-            
+
         # Validate input_type value
         input_type = gene_fetch_config.get("input_type", "").lower()
         if input_type not in ["taxid", "hierarchical"]:
             sys.stderr.write("WARNING: 'input_type' must be either 'taxid' or 'hierarchical'\n")
             sys.exit(1)
-			
+
+        # Validate type value
+        fetch_type = gene_fetch_config.get("type", "").lower()
+        if fetch_type not in ("protein", "both"):
+            sys.stderr.write("WARNING: gene_fetch 'type' must be either 'protein' or 'both'\n")
+            sys.exit(1)
+
         # Validate minimum_length value
         minimum_length = gene_fetch_config.get("minimum_length", 500)
         try:
@@ -88,6 +94,63 @@ def validate_gene_fetch_config(config):
             sys.stderr.write(f"WARNING: Sequence reference file not found: {config['sequence_reference_file']}\n")
             sys.exit(1)
 
+def validate_contaminant_screen_config(config):
+    """Validate contaminant screening configuration"""
+    contaminant_screen_config = config.get("contaminant_screen", {})
+    contaminant_screen_enabled = contaminant_screen_config.get("enabled", False)
+    
+    if not isinstance(contaminant_screen_enabled, bool):
+        sys.stderr.write("WARNING: 'contaminant_screen.enabled' must be a boolean (true/false)\n")
+        sys.exit(1)
+    
+    if contaminant_screen_enabled:
+        # Validate contaminant reference sequences file
+        contam_seqs = contaminant_screen_config.get("contam_seqs", "")
+        if not contam_seqs:
+            sys.stderr.write("WARNING: 'contaminant_screen.contam_seqs' is required when contaminant screening is enabled\n")
+            sys.exit(1)
+        if not os.path.exists(contam_seqs):
+            sys.stderr.write(f"WARNING: Contaminant reference sequences file not found: {contam_seqs}\n")
+            sys.exit(1)
+        
+        # Validate k parameter
+        k = contaminant_screen_config.get("k", 31)
+        try:
+            k = int(k)
+            if k < 1:
+                sys.stderr.write("WARNING: 'contaminant_screen.k' must be a positive integer\n")
+                sys.exit(1)
+        except (ValueError, TypeError):
+            sys.stderr.write("WARNING: 'contaminant_screen.k' must be an integer\n")
+            sys.exit(1)
+
+def validate_human_mitogenome_filter_config(config):
+    """Validate human mitogenome filter configuration"""
+    fc_config = config.get("fasta_cleaner", {})
+    
+    # Validate human genome reference path
+    human_genome = fc_config.get("human_genome", "")
+    if not human_genome:
+        default_path = os.path.join(workflow.basedir, "..", "resources/contaminants/human_mitogenome.fasta")
+        if not os.path.exists(default_path):
+            sys.stderr.write(f"WARNING: Default human mitogenome reference not found: {default_path}\n")
+            sys.exit(1)
+    elif not os.path.exists(human_genome):
+        sys.stderr.write(f"WARNING: Human mitogenome reference not found: {human_genome}\n")
+        sys.exit(1)
+    
+    # Validate aligner choice
+    aligner = fc_config.get("aligner", "bwa-aln")
+    if aligner not in ["minimap2", "bwa-mem", "bwa-aln"]:
+        sys.stderr.write(f"WARNING: 'fasta_cleaner.aligner' must be one of: minimap2, bwa-mem, bwa-aln\n")
+        sys.exit(1)
+    
+    # Validate save_removed is boolean
+    save_removed = fc_config.get("save_removed", False)
+    if not isinstance(save_removed, bool):
+        sys.stderr.write("WARNING: 'fasta_cleaner.save_removed' must be a boolean (true/false)\n")
+        sys.exit(1)
+		
 def validate_structural_validation_config(config):
     """Validate structural validation configuration"""
     run_structural_validation = config.get("run_structural_validation", True)
@@ -147,11 +210,14 @@ def validate_taxonomic_validation_config(config):
 # Run all validations
 validate_config(config)
 validate_gene_fetch_config(config)
+validate_contaminant_screen_config(config)
+validate_human_mitogenome_filter_config(config)
 validate_structural_validation_config(config)
 validate_taxonomic_validation_config(config)
 
 # Print configuration
 print("\n=====Configuration loaded:=====\n", config) 
+
 
 
 
@@ -217,6 +283,8 @@ def parse_sequence_references(sequence_reference_file):
 
 
 
+
+
 # ===== CONFIGURATION PARAMETERS =====
 # Load basic parameters
 samples = parse_samples(config["samples_file"])
@@ -234,6 +302,15 @@ if run_gene_fetch:
     sequence_reference_file_path = os.path.join(config["output_dir"], "02_references", "sequence_references.csv")
 else:
     sequence_reference_file_path = config["sequence_reference_file"]
+	
+# Contaminant screening configuration
+contaminant_screen_config = config.get("contaminant_screen", {})
+contaminant_screen_enabled = contaminant_screen_config.get("enabled", False)
+contaminant_screen_contam_seqs = contaminant_screen_config.get(
+    "contam_seqs",
+    os.path.join(workflow.basedir, "..", "resources/contaminants/contaminants.fasta")
+)
+contaminant_screen_k = contaminant_screen_config.get("k", 31)
 
 # Downsampling configuration
 downsampling_enabled = config.get("downsampling", {}).get("enabled", False)
@@ -242,11 +319,19 @@ max_reads = config.get("downsampling", {}).get("max_reads", 0)
 # Fasta cleaner configuration
 fasta_cleaner_params = config.get("fasta_cleaner", {
     "consensus_threshold": 0.5,
-    "human_threshold": 0.95,
     "at_difference": 0.1,
     "at_mode": "absolute",
     "outlier_percentile": 90.0
 })
+
+# Human mitogenome filter configuration (reads from fasta_cleaner section)
+human_mitogenome_filter_human_genome = fasta_cleaner_params.get("human_genome", "")
+if not human_mitogenome_filter_human_genome:
+    human_mitogenome_filter_human_genome = os.path.join(
+        workflow.basedir, "..", "resources/contaminants/human_mitogenome.fasta"
+    )
+human_mitogenome_filter_aligner = fasta_cleaner_params.get("aligner", "bwa-aln")
+human_mitogenome_filter_save_removed = fasta_cleaner_params.get("save_removed", False)
 
 # Structural validation configuration
 run_structural_validation = config.get("run_structural_validation", True)
@@ -273,6 +358,8 @@ rule_resources = config["rules"]
 
 
 
+
+
 # ===== DIRECTORY STRUCTURE SETUP =====
 # Create main output directory
 main_output_dir = config["output_dir"]
@@ -292,6 +379,8 @@ barcode_recovery_dir_concat = os.path.join(barcode_recovery_dir, "concat_mode")
 if run_gene_fetch:
     references_dir = os.path.join(main_output_dir, "02_references")
     Path(references_dir).mkdir(parents=True, exist_ok=True)
+
+
 
 
 
@@ -331,15 +420,89 @@ def get_all_mge_consensus_files(mode):
     return files
 
 def get_mge_input_merge(wildcards):
-    """Get the right input for merge mode"""
+    """Get the right input for merge mode.
+    
+    Chain: fastp_pe_merge -> (contaminant_screen_merge) -> (downsample_merge) -> clean_headers_merge -> MGE
+    """
     return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged_clean.fastq")
 
 def get_mge_input_concat(wildcards):
-    """Get input for concat mode"""
+    """Get input for concat mode.
+    
+    Chain: fastp_pe_concat -> (contaminant_screen_concat) -> (downsample_concat) -> fastq_concat -> quality_trim -> MGE
+    """
     if downsampling_enabled:
         return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_concat_trimmed_downsampled.fastq")
     else:
         return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_concat_trimmed.fq")
+
+def get_clean_headers_merge_input(wildcards):
+    """Get input for clean_headers_merge based on whether downsampling is enabled.
+    
+    Chain: (contaminant_screen_merge or fastp) -> (downsample_merge) -> clean_headers_merge
+    """
+    if downsampling_enabled:
+        return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged_downsampled.fastq.gz")
+    elif contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged.fastq.gz")
+
+def get_downsample_merge_input(wildcards):
+    """Get input for downsample_merge based on whether contaminant screening is enabled.
+    
+    Chain: (contaminant_screen_merge or fastp) -> downsample_merge
+    """
+    if contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_merge, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_merged.fastq.gz")
+
+def get_contaminant_screen_concat_input_R1(wildcards):
+    """Get R1 input for contaminant_screen_concat (from fastp_pe_concat)."""
+    return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_trimmed.fastq.gz")
+
+def get_contaminant_screen_concat_input_R2(wildcards):
+    """Get R2 input for contaminant_screen_concat (from fastp_pe_concat)."""
+    return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_trimmed.fastq.gz")
+
+def get_fastq_concat_input_R1(wildcards):
+    """Get R1 input for fastq_concat based on whether downsampling is enabled.
+    
+    Chain: (contaminant_screen or fastp) -> (downsample) -> fastq_concat
+    """
+    if downsampling_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_trimmed_downsampled.fastq.gz")
+    elif contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_trimmed.fastq.gz")
+
+def get_fastq_concat_input_R2(wildcards):
+    """Get R2 input for fastq_concat based on whether downsampling is enabled.
+    
+    Chain: (contaminant_screen or fastp) -> (downsample) -> fastq_concat
+    """
+    if downsampling_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_trimmed_downsampled.fastq.gz")
+    elif contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_trimmed.fastq.gz")
+
+def get_downsample_concat_input_R1(wildcards):
+    """Get R1 input for downsample_concat based on whether contaminant screening is enabled."""
+    if contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R1_trimmed.fastq.gz")
+
+def get_downsample_concat_input_R2(wildcards):
+    """Get R2 input for downsample_concat based on whether contaminant screening is enabled."""
+    if contaminant_screen_enabled:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_decontaminated.fastq.gz")
+    else:
+        return os.path.join(preprocessing_dir_concat, f"trimmed_data/{wildcards.sample}/{wildcards.sample}_R2_trimmed.fastq.gz")
 
 # Set up derived parameters
 hmm_file_path = get_hmm_file_for_target(structural_validation_params["target"]) if run_structural_validation else ""
@@ -348,22 +511,27 @@ use_reference_filtering = reference_dir and reference_dir not in ["None", "null"
 
 
 
+
 # ===== SNAKEMAKE RULE ALL =====
 rule all:
     input:
         # ==== GENE FETCH (CONDITIONAL) ====
         (os.path.join(main_output_dir, "02_references/sequence_references.csv") if run_gene_fetch else []),
-        
+
         # ==== PREPROCESSING OUTPUTS ====
         # Merge mode preprocessing
         os.path.join(preprocessing_dir_merge, "logs/clean_headers/clean_headers.log"),
-        
+
         # Concat mode preprocessing
         os.path.join(preprocessing_dir_concat, "logs/concat/concat_reads.log"),
         os.path.join(preprocessing_dir_concat, "logs/trim_galore/trim_galore.log"),
         expand(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq.gz"), sample=list(samples.keys())),
         expand(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz"), sample=list(samples.keys())), 
-        
+
+        # ==== CONTAMINANT SCREENING OUTPUTS (CONDITIONAL) ====
+        (expand(os.path.join(preprocessing_dir_merge, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"), sample=list(samples.keys())) if contaminant_screen_enabled else []),
+        (expand(os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"), sample=list(samples.keys())) if contaminant_screen_enabled else []),
+
         # ==== BARCODE RECOVERY OUTPUTS ====
         # Merge mode barcode recovery
         os.path.join(barcode_recovery_dir_merge, f"consensus/{run_name}_cons_combined-merge.fasta"),
@@ -382,7 +550,7 @@ rule all:
         (os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/04_reference_filtered/reference_filter_metrics.csv") if use_reference_filtering else []), 
         os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/cleaned_cons_combined.fasta"),
         os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/05_cleaned_consensus/cleaned_cons_metrics-merge.csv"),
-        
+
         # Concat mode barcode recovery
         os.path.join(barcode_recovery_dir_concat, f"consensus/{run_name}_cons_combined-concat.fasta"),
         os.path.join(barcode_recovery_dir_concat, "logs/mge/alignment_files.log"),
@@ -400,22 +568,22 @@ rule all:
         os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/cleaned_cons_combined.fasta"),
         os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/05_cleaned_consensus/cleaned_cons_metrics-concat.csv"),
         os.path.join(barcode_recovery_dir_concat, "logs/exonerate_int_cleanup_complete.txt"),
-		
-        # ==== BARCODE RECOVERY OUTPUTS (EXTRA) ====
+
+        # ==== BARCODE RECOVERY OUTPUTS ====
         os.path.join(barcode_recovery_dir_merge, "logs/fasta_cleaner/fasta_cleaner_complete.txt"),
         os.path.join(barcode_recovery_dir_concat, "logs/fasta_cleaner/fasta_cleaner_complete.txt"),
         os.path.join(barcode_recovery_dir, "barcode_consensus_count.tsv"),
         os.path.join(barcode_recovery_dir, "logs/barcode_consensus_count.log"),
-		
-		# ==== STRUCTURAL VALIDATION (CONDITIONAL) ====
+
+        # ==== STRUCTURAL VALIDATION (CONDITIONAL) ====
         (os.path.join(main_output_dir, f"04_barcode_validation/structural/structural_validation.csv") if run_structural_validation else []),
         (os.path.join(main_output_dir, f"04_barcode_validation/structural/output_barcode_all_passing.fasta") if run_structural_validation else []),
-		
-		# ==== TAXONOMIC VALIDATION (CONDITIONAL) ====
+
+        # ==== TAXONOMIC VALIDATION (CONDITIONAL) ====
         (os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/metrics/01_local_blast_output.csv") if run_taxonomic_validation else []),
         (os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/validated_barcodes.fasta") if run_taxonomic_validation else []),
         (os.path.join(main_output_dir, f"04_barcode_validation/taxonomic/metrics/02_taxonomic_validation.csv") if run_taxonomic_validation else []),
-       
+
         # ==== FINAL OUTPUTS ====
         os.path.join(barcode_recovery_dir, f"{run_name}_barcode_recovery_metrics.csv"),
         os.path.join(barcode_recovery_dir, f"{run_name}_all_cons_combined.fasta"),
@@ -423,7 +591,7 @@ rule all:
         (os.path.join(main_output_dir, "05_barcoding_outcome/barcoding_outcome.tsv") if run_structural_validation and run_taxonomic_validation else []),
         os.path.join(preprocessing_dir_concat, "logs/final_cleanup_complete.txt"),
         os.path.join(preprocessing_dir_merge, "logs/final_cleanup_complete.txt"),
-		
+
 # ===== GENE FETCH RULE =====
 if run_gene_fetch:
     rule gene_fetch:
@@ -442,6 +610,7 @@ if run_gene_fetch:
             input_type=config["gene_fetch"]["input_type"].lower(),
             genbank=config["gene_fetch"].get("genbank", False),
             output_dir=os.path.join(main_output_dir, "02_references"),
+            type=config["gene_fetch"]["type"].lower(),
             min_length=config["gene_fetch"].get("minimum_length", False),
             genbank_flag="--genbank" if config["gene_fetch"].get("genbank", False) else "",
             input_flag="--in" if config["gene_fetch"]["input_type"].lower() == "taxid" else "--in2"
@@ -471,7 +640,7 @@ if run_gene_fetch:
                 --api-key {params.api_key} \\
                 {params.input_flag} {input.samples_csv} \\
                 --gene {params.gene} \\
-                --type protein \\
+                --type {params.type} \\
                 --protein-size {params.min_length} \\
                 {params.genbank_flag} \\
                 --out {params.output_dir} \\
@@ -487,6 +656,9 @@ if run_gene_fetch:
             fi
             """
 
+
+
+
 # ===== PREPROCESSING RULES - MERGE MODE =====
 rule fastp_pe_merge:
     input:
@@ -497,7 +669,7 @@ rule fastp_pe_merge:
         R2_trimmed=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz")),
         report=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_fastp_report.html"),
         json=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_fastp_report.json"),
-        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq"),
+        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq.gz"),
         unpaired_R1=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}/{sample}_unpaired_R1.fastq")),
         unpaired_R2=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/unpaired/{sample}/{sample}_unpaired_R2.fastq"))
     log:
@@ -510,7 +682,7 @@ rule fastp_pe_merge:
     shell:
         """
         set -euo pipefail
-		
+
         # Log job start
         echo "======== Fastp Merge Processing ========" > {log.out}
         echo "Sample: {wildcards.sample}" >> {log.out}
@@ -530,7 +702,7 @@ rule fastp_pe_merge:
         echo "  R1: $(numfmt --to=iec $(stat -c%s {input.R1}))" >> {log.out}
         echo "  R2: $(numfmt --to=iec $(stat -c%s {input.R2}))" >> {log.out}
 
-        # Run fastp
+        # Run fastp (merged output is gzipped via -z flag)
         echo "Running fastp: $(date)" >> {log.out}
         if fastp -i {input.R1} -I {input.R2} \\
               -o {output.R1_trimmed} -O {output.R2_trimmed} \\
@@ -550,20 +722,110 @@ rule fastp_pe_merge:
             exit 1
         fi
 
-        # Log output file sizes
-        echo "Output file sizes:" >> {log.out}
-        echo "  R1_trimmed: $(numfmt --to=iec $(stat -c%s {output.R1_trimmed}))" >> {log.out}
-        echo "  R2_trimmed: $(numfmt --to=iec $(stat -c%s {output.R2_trimmed}))" >> {log.out}
-        echo "  Merged: $(numfmt --to=iec $(stat -c%s {output.merged_reads}))" >> {log.out}
+        # Validate outputs - create mock files if empty or missing
+        if [[ ! -s {output.merged_reads} ]]; then
+            echo "ERROR: Output files are empty or missing" >> {log.out}
+            echo "  Likely cause: Input files were empty, or all reads were filtered out during trimming/merging" >> {log.out}
+            echo "Creating empty placeholder outputs..." >> {log.out}
+            touch {output.merged_reads}
+            touch {output.R1_trimmed}
+            touch {output.R2_trimmed}
+            echo "Placeholders created: $(date)" >> {log.out}
+        else
+            echo "Output file sizes:" >> {log.out}
+            echo "  R1_trimmed: $(numfmt --to=iec $(stat -c%s {output.R1_trimmed}))" >> {log.out}
+            echo "  R2_trimmed: $(numfmt --to=iec $(stat -c%s {output.R2_trimmed}))" >> {log.out}
+            echo "  Merged: $(numfmt --to=iec $(stat -c%s {output.merged_reads}))" >> {log.out}
+        fi
         echo "Processing completed: $(date)" >> {log.out}
         """
+
+if contaminant_screen_enabled:
+    rule contaminant_screen_merge:
+        input:
+            merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq.gz")
+        output:
+            decontaminated=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_decontaminated.fastq.gz"),
+            contaminant_reads=os.path.join(preprocessing_dir_merge, "contaminant_screen/{sample}/{sample}_contaminant_reads.fastq.gz"),
+            stats=os.path.join(preprocessing_dir_merge, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"),
+            refstats=os.path.join(preprocessing_dir_merge, "contaminant_screen/{sample}/{sample}_refstats.txt")
+        params:
+            contam_seqs=contaminant_screen_contam_seqs,
+            k=contaminant_screen_k
+        log:
+            out=os.path.join(preprocessing_dir_merge, "logs/contaminant_screen/{sample}.out"),
+            err=os.path.join(preprocessing_dir_merge, "logs/contaminant_screen/{sample}.err")
+        threads: rule_resources["contaminant_screen"]["threads"]
+        resources:
+            mem_mb=lambda wildcards, attempt: rule_resources["contaminant_screen"]["mem_mb"] * attempt,
+            slurm_partition=rule_resources["contaminant_screen"]["partition"]
+        retries: 3
+        shell:
+            """
+            set -euo pipefail
+
+            # Create output directories
+            mkdir -p $(dirname {output.decontaminated})
+            mkdir -p $(dirname {output.stats})
+
+            # Calculate Java heap size (resource allocation minus 4GB buffer for JVM overhead)
+            JVM_MEM_MB=$(( {resources.mem_mb} - 4096 ))
+            if [ $JVM_MEM_MB -lt 1024 ]; then
+                JVM_MEM_MB=1024
+            fi
+
+            echo "======== BBDuk Contaminant Screen (Merge/SE) ========" > {log.out}
+            echo "Sample: {wildcards.sample}" >> {log.out}
+            echo "Started: $(date)" >> {log.out}
+            echo "Input: {input.merged_reads}" >> {log.out}
+            echo "Contaminants: {params.contam_seqs}" >> {log.out}
+            echo "k: {params.k}" >> {log.out}
+            echo "Threads: {threads}" >> {log.out}
+            echo "JVM heap: ${{JVM_MEM_MB}}m" >> {log.out}
+            echo "=====================================================" >> {log.out}
+
+            # Log input file size
+            echo "Input file size: $(numfmt --to=iec $(stat -c%s {input.merged_reads}))" >> {log.out}
+
+            # Check if input file is empty or missing
+            if [ ! -s "{input.merged_reads}" ]; then
+                echo "Input file is empty or missing - creating placeholder outputs" >> {log.out}
+                touch {output.decontaminated}
+                touch {output.contaminant_reads}
+                echo "No reads processed" > {output.stats}
+                echo "No reads processed" > {output.refstats}
+                echo "Placeholder outputs created: $(date)" >> {log.out}
+                exit 0
+            fi
+
+            # Run BBDuk in single-end mode on merged reads
+            bbduk.sh -Xmx${{JVM_MEM_MB}}m \\
+                in={input.merged_reads} \\
+                out={output.decontaminated} \\
+                outm={output.contaminant_reads} \\
+                ref={params.contam_seqs} \\
+                k={params.k} \\
+                hdist=0 \\
+                stats={output.stats} \\
+                refstats={output.refstats} \\
+                rename=t \\
+                ordered=t \\
+                threads={threads} \\
+                >> {log.out} 2>> {log.err}
+
+            # Log output file sizes
+            echo "Output file sizes:" >> {log.out}
+            echo "  Decontaminated: $(numfmt --to=iec $(stat -c%s {output.decontaminated}))" >> {log.out}
+            echo "  Contaminant reads: $(numfmt --to=iec $(stat -c%s {output.contaminant_reads}))" >> {log.out}
+            echo "Completed: $(date)" >> {log.out}
+            """
 
 if downsampling_enabled:
     rule downsample_merge:
         input:
-            merged_reads=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq"))
+            merged_reads=get_downsample_merge_input
         output:
-            downsampled=temp(os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq"))
+            downsampled=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq.gz")
         params:
             max_reads=config["downsampling"]["max_reads"]
         log:
@@ -580,6 +842,15 @@ if downsampling_enabled:
             echo "Downsampling merged reads for {wildcards.sample}" > {log.out}
             echo "Started: $(date)" >> {log.out}
             echo "Target reads: {params.max_reads}" >> {log.out}
+            echo "Input: {input.merged_reads}" >> {log.out}
+
+            # Check if input file is empty or missing
+            if [ ! -s "{input.merged_reads}" ]; then
+                echo "Input file is empty or missing - creating placeholder output" >> {log.out}
+                touch {output.downsampled}
+                echo "Placeholder output created: $(date)" >> {log.out}
+                exit 0
+            fi
 
             reformat.sh in={input.merged_reads} \\
                         out={output.downsampled} \\
@@ -593,7 +864,7 @@ if downsampling_enabled:
 
 rule clean_headers_merge:
     input:
-        merged_reads=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_downsampled.fastq") if downsampling_enabled else os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged.fastq")
+        merged_reads=get_clean_headers_merge_input
     output:
         clean_merged=os.path.join(preprocessing_dir_merge, "trimmed_data/{sample}/{sample}_merged_clean.fastq")
     log:
@@ -615,9 +886,10 @@ rule clean_headers_merge:
         echo "Cleaning headers for {wildcards.sample}" > {log.out}
         echo "Started: $(date)" >> {log.out}
         echo "Host: $(hostname)" >> {log.out}
+        echo "Input: {input.merged_reads}" >> {log.out}
 
-        # Simple sed replacement with error handling
-        if sed 's/ /_/g' {input.merged_reads} > {output.clean_merged} 2>> {log.err}; then
+        # Decompress and clean headers in one step
+        if zcat {input.merged_reads} | sed 's/ /_/g' > {output.clean_merged} 2>> {log.err}; then
             echo "Completed: $(date)" >> {log.out}
             echo "Output file size: $(numfmt --to=iec $(stat -c%s {output.clean_merged}))" >> {log.out}
             echo "--------------------------------------------" >> {log.out}
@@ -653,15 +925,20 @@ rule aggregate_clean_headers_logs_merge:
         cat {input.sample_logs} >> {output.combined_log} 2>> {log.err}
         echo "Aggregation complete." >> {log.out}
         """
-		
+
+
+
+
+
+
 # ===== PREPROCESSING RULES - CONCAT MODE =====
 rule fastp_pe_concat:
     input:
         R1=lambda wildcards: samples[wildcards.sample]["R1"],
         R2=lambda wildcards: samples[wildcards.sample]["R2"]
     output:
-        R1_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq"),
-        R2_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq"),
+        R1_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq.gz"),
+        R2_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz"),
         report=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_fastp_report.html"),
         json=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_fastp_report.json")
     log:
@@ -678,7 +955,7 @@ rule fastp_pe_concat:
         # Create output directories
         mkdir -p $(dirname {output.R1_trimmed})
         mkdir -p $(dirname {output.report})
-        
+
         # Log job start
         echo "======== Fastp Concat Processing ========" > {log.out}
         echo "Sample: {wildcards.sample}" >> {log.out}
@@ -686,7 +963,7 @@ rule fastp_pe_concat:
         echo "Input files: {input.R1}, {input.R2}" >> {log.out}
         echo "Threads: {threads}" >> {log.out}
         echo "=========================================" >> {log.out}
-        
+
         # Check input files exist
         if [[ ! -f "{input.R1}" ]] || [[ ! -f "{input.R2}" ]]; then
             echo "ERROR: Input files not found" >> {log.out}
@@ -697,8 +974,8 @@ rule fastp_pe_concat:
         echo "Input file sizes:" >> {log.out}
         echo "  R1: $(numfmt --to=iec $(stat -c%s {input.R1}))" >> {log.out}
         echo "  R2: $(numfmt --to=iec $(stat -c%s {input.R2}))" >> {log.out}
-        
-        # Run fastp
+
+        # Run fastp (outputs gzipped via .gz extension auto-detection)
         echo "Running fastp: $(date)" >> {log.out}
         if fastp -i {input.R1} -I {input.R2} \\
                  -o {output.R1_trimmed} -O {output.R2_trimmed} \\
@@ -714,18 +991,22 @@ rule fastp_pe_concat:
             echo "ERROR: Fastp failed with exit code $?" >> {log.out}
             exit 1
         fi
-        
-        # Validate outputs exist
+
+        # Validate outputs - create mock files if empty or missing
         if [[ ! -s {output.R1_trimmed} ]] || [[ ! -s {output.R2_trimmed} ]]; then
             echo "ERROR: Output files are empty or missing" >> {log.out}
-            exit 1
+            echo "  Likely cause: Input files were empty, or all reads were filtered out during trimming" >> {log.out}
+            echo "Creating empty placeholder outputs..." >> {log.out}
+            touch {output.R1_trimmed}
+            touch {output.R2_trimmed}
+            echo "Placeholders created: $(date)" >> {log.out}
+        else
+            echo "Output file sizes:" >> {log.out}
+            echo "  R1_trimmed: $(numfmt --to=iec $(stat -c%s {output.R1_trimmed}))" >> {log.out}
+            echo "  R2_trimmed: $(numfmt --to=iec $(stat -c%s {output.R2_trimmed}))" >> {log.out}
         fi
-        
-        # Clean headers
-        echo "Cleaning headers: $(date)" >> {log.out}
-        perl -i -pe 's/ /_/g' {output.R1_trimmed}
-        perl -i -pe 's/ /_/g' {output.R2_trimmed}
-        
+        echo "Processing completed: $(date)" >> {log.out}
+
         # Log output file sizes
         echo "Output file sizes:" >> {log.out}
         echo "  R1_trimmed: $(numfmt --to=iec $(stat -c%s {output.R1_trimmed}))" >> {log.out}
@@ -733,10 +1014,151 @@ rule fastp_pe_concat:
         echo "Processing completed: $(date)" >> {log.out}
         """
 
+if contaminant_screen_enabled:
+    rule contaminant_screen_concat:
+        input:
+            R1=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq.gz"),
+            R2=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz")
+        output:
+            R1_decontaminated=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_decontaminated.fastq.gz"),
+            R2_decontaminated=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_decontaminated.fastq.gz"),
+            R1_contaminant=os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_contaminant_R1.fastq.gz"),
+            R2_contaminant=os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_contaminant_R2.fastq.gz"),
+            stats=os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"),
+            refstats=os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_refstats.txt")
+        params:
+            contam_seqs=contaminant_screen_contam_seqs,
+            k=contaminant_screen_k
+        log:
+            out=os.path.join(preprocessing_dir_concat, "logs/contaminant_screen/{sample}.out"),
+            err=os.path.join(preprocessing_dir_concat, "logs/contaminant_screen/{sample}.err")
+        threads: rule_resources["contaminant_screen"]["threads"]
+        resources:
+            mem_mb=lambda wildcards, attempt: rule_resources["contaminant_screen"]["mem_mb"] * attempt,
+            slurm_partition=rule_resources["contaminant_screen"]["partition"]
+        retries: 3
+        shell:
+            """
+            set -euo pipefail
+
+            # Create output directories
+            mkdir -p $(dirname {output.R1_decontaminated})
+            mkdir -p $(dirname {output.stats})
+
+            # Calculate Java heap size (resource allocation minus 4GB buffer for JVM overhead)
+            JVM_MEM_MB=$(( {resources.mem_mb} - 4096 ))
+            if [ $JVM_MEM_MB -lt 1024 ]; then
+                JVM_MEM_MB=1024
+            fi
+
+            echo "======== BBDuk Contaminant Screen (Concat/PE) ========" > {log.out}
+            echo "Sample: {wildcards.sample}" >> {log.out}
+            echo "Started: $(date)" >> {log.out}
+            echo "Input R1: {input.R1}" >> {log.out}
+            echo "Input R2: {input.R2}" >> {log.out}
+            echo "Contaminants: {params.contam_seqs}" >> {log.out}
+            echo "k: {params.k}" >> {log.out}
+            echo "Threads: {threads}" >> {log.out}
+            echo "JVM heap: ${{JVM_MEM_MB}}m" >> {log.out}
+            echo "======================================================" >> {log.out}
+
+            # Log input file sizes
+            echo "Input file sizes:" >> {log.out}
+            echo "  R1: $(numfmt --to=iec $(stat -c%s {input.R1}))" >> {log.out}
+            echo "  R2: $(numfmt --to=iec $(stat -c%s {input.R2}))" >> {log.out}
+
+            # Check if input files are empty or missing
+            if [ ! -s "{input.R1}" ] || [ ! -s "{input.R2}" ]; then
+                echo "Input files are empty or missing - creating placeholder outputs" >> {log.out}
+                touch {output.R1_decontaminated}
+                touch {output.R2_decontaminated}
+                touch {output.R1_contaminant}
+                touch {output.R2_contaminant}
+                echo "No reads processed" > {output.stats}
+                echo "No reads processed" > {output.refstats}
+                echo "Placeholder outputs created: $(date)" >> {log.out}
+                exit 0
+            fi
+
+            # Run BBDuk in paired-end mode
+            bbduk.sh -Xmx${{JVM_MEM_MB}}m \\
+                in1={input.R1} \\
+                in2={input.R2} \\
+                out1={output.R1_decontaminated} \\
+                out2={output.R2_decontaminated} \\
+                outm1={output.R1_contaminant} \\
+                outm2={output.R2_contaminant} \\
+                ref={params.contam_seqs} \\
+                k={params.k} \\
+                hdist=0 \\
+                stats={output.stats} \\
+                refstats={output.refstats} \\
+                rename=t \\
+                ordered=t \\
+                threads={threads} \\
+                >> {log.out} 2>> {log.err}
+
+            # Log output file sizes
+            echo "Output file sizes:" >> {log.out}
+            echo "  R1 decontaminated: $(numfmt --to=iec $(stat -c%s {output.R1_decontaminated}))" >> {log.out}
+            echo "  R2 decontaminated: $(numfmt --to=iec $(stat -c%s {output.R2_decontaminated}))" >> {log.out}
+            echo "  R1 contaminant: $(numfmt --to=iec $(stat -c%s {output.R1_contaminant}))" >> {log.out}
+            echo "  R2 contaminant: $(numfmt --to=iec $(stat -c%s {output.R2_contaminant}))" >> {log.out}
+            echo "Completed: $(date)" >> {log.out}
+            """
+
+if downsampling_enabled:
+    rule downsample_concat:
+        input:
+            R1=get_downsample_concat_input_R1,
+            R2=get_downsample_concat_input_R2
+        output:
+            R1_downsampled=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed_downsampled.fastq.gz"),
+            R2_downsampled=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed_downsampled.fastq.gz")
+        params:
+            max_reads=config["downsampling"]["max_reads"]
+        log:
+            out=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.out"),
+            err=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.err")
+        threads: rule_resources["downsample"]["threads"]
+        resources:
+            mem_mb=lambda wildcards, attempt: rule_resources["downsample"]["mem_mb"] * attempt
+        retries: 3
+        shell:
+            """
+            set -euo pipefail
+
+            echo "Downsampling paired-end reads for {wildcards.sample}" > {log.out}
+            echo "Started: $(date)" >> {log.out}
+            echo "Target reads per file: {params.max_reads}" >> {log.out}
+            echo "Input R1: {input.R1}" >> {log.out}
+            echo "Input R2: {input.R2}" >> {log.out}
+
+            # Check if input files are empty or missing
+            if [ ! -s "{input.R1}" ] || [ ! -s "{input.R2}" ]; then
+                echo "Input files are empty or missing - creating placeholder outputs" >> {log.out}
+                touch {output.R1_downsampled}
+                touch {output.R2_downsampled}
+                echo "Placeholder outputs created: $(date)" >> {log.out}
+                exit 0
+            fi
+
+            reformat.sh in1={input.R1} in2={input.R2} \\
+                        out1={output.R1_downsampled} out2={output.R2_downsampled} \\
+                        samplereadstarget={params.max_reads} \\
+                        sampleseed=12345 \\
+                        >> {log.out} 2>> {log.err}
+
+            echo "Completed: $(date)" >> {log.out}
+            echo "Output file sizes:" >> {log.out}
+            echo "  R1: $(numfmt --to=iec $(stat -c%s {output.R1_downsampled}))" >> {log.out}
+            echo "  R2: $(numfmt --to=iec $(stat -c%s {output.R2_downsampled}))" >> {log.out}
+            """
+
 rule fastq_concat:
     input:
-        R1=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq"),
-        R2=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq")
+        R1=get_fastq_concat_input_R1,
+        R2=get_fastq_concat_input_R2
     output:
         temp(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat.fastq"))
     log:
@@ -749,52 +1171,16 @@ rule fastq_concat:
         """
         set -euo pipefail
                 
-        echo "Concatenating files for {wildcards.sample}" > {log.out}
+        echo "Concatenating and cleaning headers for {wildcards.sample}" > {log.out}
         echo "Started: $(date)" >> {log.out}
+        echo "Input R1: {input.R1}" >> {log.out}
+        echo "Input R2: {input.R2}" >> {log.out}
 
-        # Concatenation
-        (cat {input.R1} && cat {input.R2}) > {output} 2>> {log.out}
+        # Decompress, clean headers (replace spaces with underscores), and concatenate
+        (zcat {input.R1} | sed 's/ /_/g' && zcat {input.R2} | sed 's/ /_/g') > {output} 2>> {log.out}
 
         echo "Completed: $(date)" >> {log.out}
         echo "Output file size: $(numfmt --to=iec $(stat -c%s {output}))" >> {log.out}
-        """
-
-rule gzip_trimmed:
-    input:
-        R1=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq"),
-        R2=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq"),
-        concat=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat.fastq")
-    output:
-        R1_gz=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R1_trimmed.fastq.gz"),
-        R2_gz=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_R2_trimmed.fastq.gz")
-    log:
-        out=os.path.join(preprocessing_dir_concat, "logs/gzip/{sample}.out")
-    threads: 1  # gzip is single-threaded
-    resources:
-        mem_mb=lambda wildcards, attempt: rule_resources["gzip_trimmed"]["mem_mb"] * attempt
-    retries: 3
-    shell:
-        """
-        set -euo pipefail
-        
-        echo "Compressing trimmed files for {wildcards.sample}" > {log.out}
-        echo "Started: $(date)" >> {log.out}
-        
-        # Compress the trimmed files using gzip
-        echo "Compressing R1 file with gzip..." >> {log.out}
-        gzip -c {input.R1} > {output.R1_gz} 2>> {log.out}
-        
-        echo "Compressing R2 file with gzip..." >> {log.out}
-        gzip -c {input.R2} > {output.R2_gz} 2>> {log.out}
-        
-        # Remove the original uncompressed files
-        echo "Removing original uncompressed files..." >> {log.out}
-        rm {input.R1} {input.R2}
-        
-        echo "Compression completed: $(date)" >> {log.out}
-        echo "Compressed file sizes:" >> {log.out}
-        echo "  R1: $(numfmt --to=iec $(stat -c%s {output.R1_gz}))" >> {log.out}
-        echo "  R2: $(numfmt --to=iec $(stat -c%s {output.R2_gz}))" >> {log.out}
         """
 
 rule aggregate_concat_logs:
@@ -847,6 +1233,15 @@ rule quality_trim:
         echo "Started: $(date)" >> {log.out}
         echo "Input file: {input}" >> {log.out}
 
+        # Check if input file is empty or missing
+        if [ ! -s "{input}" ]; then
+            echo "Input file is empty or missing - creating placeholder outputs" >> {log.out}
+            touch {output.concat_trimmed}
+            touch {output.report}
+            echo "Placeholder outputs created: $(date)" >> {log.out}
+            exit 0
+        fi
+
         # Run trim_galore
         trim_galore --cores {threads} \\
                     --dont_gzip \\
@@ -858,39 +1253,6 @@ rule quality_trim:
         echo "Completed: $(date)" >> {log.out}
         echo "Output file size: $(numfmt --to=iec $(stat -c%s {output[0]}))" >> {log.out}
         """
-
-if downsampling_enabled:
-    rule downsample_concat:
-        input:
-            concat_trimmed=os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed.fq")
-        output:
-            downsampled=temp(os.path.join(preprocessing_dir_concat, "trimmed_data/{sample}/{sample}_concat_trimmed_downsampled.fastq"))
-        params:
-            max_reads=config["downsampling"]["max_reads"] * 2  # Multiply by 2 because concat mode has R1+R2 reads
-        log:
-            out=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.out"),
-            err=os.path.join(preprocessing_dir_concat, "logs/downsample/{sample}.err")
-        threads: rule_resources["downsample"]["threads"]
-        resources:
-            mem_mb=lambda wildcards, attempt: rule_resources["downsample"]["mem_mb"] * attempt
-        retries: 3
-        shell:
-            """
-            set -euo pipefail
-
-            echo "Downsampling concatenated trimmed reads for {wildcards.sample}" > {log.out}
-            echo "Started: $(date)" >> {log.out}
-            echo "Target reads: {params.max_reads} (2x read pairs for concat mode)" >> {log.out}
-
-            reformat.sh in={input.concat_trimmed} \\
-                        out={output.downsampled} \\
-                        samplereadstarget={params.max_reads} \\
-                        sampleseed=12345 \\
-                        >> {log.out} 2>> {log.err}
-
-            echo "Completed: $(date)" >> {log.out}
-            echo "Output file size: $(numfmt --to=iec $(stat -c%s {output.downsampled}))" >> {log.out}
-            """
 
 rule aggregate_trim_galore_logs:
     input:
@@ -916,7 +1278,10 @@ rule aggregate_trim_galore_logs:
         cat {input.sample_logs} >> {output.combined_log} 2>> {log.err}
         echo "Aggregation complete." >> {log.out}
         """
-		
+
+
+
+
 # ===== MGE RULES FOR BARCODE RECOVERY =====
 
 # MGE rule for merge mode
@@ -1396,40 +1761,51 @@ rule create_alignment_log_concat:
         with open(output.alignment_log, 'w') as log_file:
             for file in alignment_files:
                 log_file.write(f"{file}\n")
-				
+
+
+
 
 # ===== FASTA CLEANER RULES - MERGE MODE =====
 
 # Sequential filtering rules (fasta_cleaner)
-rule human_cox1_filter_merge:
+rule human_mitogenome_filter_merge:
     input:
         alignment_log=os.path.join(barcode_recovery_dir_merge, "logs/mge/alignment_files.log")
     output:
         filtered_files=os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/01_human_filtered/human_filtered.txt"),
         metrics=os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/01_human_filtered/human_filter_metrics.csv")
     params:
-        script=os.path.join(workflow.basedir, "scripts/01_human_cox1_filter.py"),
+        script=os.path.join(workflow.basedir, "scripts/01_human_mitogenome_filter.py"),
         output_dir=os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/01_human_filtered"),
-        human_threshold=fasta_cleaner_params["human_threshold"]
+        human_genome=human_mitogenome_filter_human_genome,
+        aligner=human_mitogenome_filter_aligner,
+        removed_flag="--removed" if human_mitogenome_filter_save_removed else ""
     log:
-        os.path.join(barcode_recovery_dir_merge, "logs/fasta_cleaner/01_human_filter.log")
-    threads: rule_resources["human_cox1_filter"]["threads"]
+        os.path.join(barcode_recovery_dir_merge, "logs/fasta_cleaner/01_human_mitogenome_filter.log")
+    threads: rule_resources["human_mitogenome_filter"]["threads"]
     resources:
-        mem_mb=lambda wildcards, attempt: rule_resources["human_cox1_filter"]["mem_mb"] * attempt
+        mem_mb=lambda wildcards, attempt: rule_resources["human_mitogenome_filter"]["mem_mb"] * attempt
     retries: 2
     shell:
         """
         set -euo pipefail
 
         mkdir -p {params.output_dir}
+
+        # Calculate parallel files from total threads (threads / 4 threads-per-file)
+        PARALLEL_FILES=$(( {threads} / 4 ))
+        if [ $PARALLEL_FILES -lt 1 ]; then PARALLEL_FILES=1; fi
         
         python {params.script} \\
             --input-log {input.alignment_log} \\
+            --human-genome {params.human_genome} \\
             --output-dir {params.output_dir} \\
             --filtered-files-list {output.filtered_files} \\
             --metrics-csv {output.metrics} \\
-            --human-threshold {params.human_threshold} \\
-            --threads {threads} \\
+            --aligner {params.aligner} \\
+            --threads $PARALLEL_FILES \\
+            --threads-per-file 4 \\
+            {params.removed_flag} \\
             2>&1 | tee {log}
         """
 
@@ -1680,35 +2056,44 @@ else:
 # ===== FASTA CLEANER RULES - CONCAT MODE =====
 
 # Sequential filtering rules (fasta_cleaner)
-rule human_cox1_filter_concat:
+rule human_mitogenome_filter_concat:
     input:
         alignment_log=os.path.join(barcode_recovery_dir_concat, "logs/mge/alignment_files.log")
     output:
         filtered_files=os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/01_human_filtered/human_filtered.txt"),
         metrics=os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/01_human_filtered/human_filter_metrics.csv")
     params:
-        script=os.path.join(workflow.basedir, "scripts/01_human_cox1_filter.py"),
+        script=os.path.join(workflow.basedir, "scripts/01_human_mitogenome_filter.py"),
         output_dir=os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/01_human_filtered"),
-        human_threshold=fasta_cleaner_params["human_threshold"]
+        human_genome=human_mitogenome_filter_human_genome,
+        aligner=human_mitogenome_filter_aligner,
+        removed_flag="--removed" if human_mitogenome_filter_save_removed else ""
     log:
-        os.path.join(barcode_recovery_dir_concat, "logs/fasta_cleaner/01_human_filter.log")
-    threads: rule_resources["human_cox1_filter"]["threads"]
+        os.path.join(barcode_recovery_dir_concat, "logs/fasta_cleaner/01_human_mitogenome_filter.log")
+    threads: rule_resources["human_mitogenome_filter"]["threads"]
     resources:
-        mem_mb=lambda wildcards, attempt: rule_resources["human_cox1_filter"]["mem_mb"] * attempt
+        mem_mb=lambda wildcards, attempt: rule_resources["human_mitogenome_filter"]["mem_mb"] * attempt
     retries: 2
     shell:
         """
         set -euo pipefail
 
         mkdir -p {params.output_dir}
+
+        # Calculate parallel files from total threads (threads / 4 threads-per-file)
+        PARALLEL_FILES=$(( {threads} / 4 ))
+        if [ $PARALLEL_FILES -lt 1 ]; then PARALLEL_FILES=1; fi
         
         python {params.script} \\
             --input-log {input.alignment_log} \\
+            --human-genome {params.human_genome} \\
             --output-dir {params.output_dir} \\
             --filtered-files-list {output.filtered_files} \\
             --metrics-csv {output.metrics} \\
-            --human-threshold {params.human_threshold} \\
-            --threads {threads} \\
+            --aligner {params.aligner} \\
+            --threads $PARALLEL_FILES \\
+            --threads-per-file 4 \\
+            {params.removed_flag} \\
             2>&1 | tee {log}
         """
 
@@ -1956,7 +2341,9 @@ else:
                 
             touch {output.completion_flag}
             """
-			
+
+
+
 # ===== CLEANUP AND CONSENSUS COMBINATION RULES =====
 
 # Clean up intermediate fasta files from filtering directories (remove intermediate FASTA files)
@@ -2302,14 +2689,16 @@ rule extract_stats_to_csv_merge:
         cleaning_csv=os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/combined_statistics.csv"),
         cleaner_complete=os.path.join(barcode_recovery_dir_merge, "logs/fasta_cleaner_complete.txt"),
         post_fasta=os.path.join(barcode_recovery_dir_merge, "fasta_cleaner/cleaned_cons_combined.fasta"),
-        ref_seqs=os.path.join(main_output_dir, "02_references/sequence_references.csv") if run_gene_fetch else []
+        ref_seqs=os.path.join(main_output_dir, "02_references/sequence_references.csv") if run_gene_fetch else [],
+        contaminant_stats=expand(os.path.join(preprocessing_dir_merge, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"), sample=list(samples.keys())) if contaminant_screen_enabled else []
     output:
         stats=os.path.join(barcode_recovery_dir_merge, f"{run_name}_merge-stats.csv")
     params:
         script=os.path.join(workflow.basedir, "scripts/compile_barcoding_stats.py"),
         out_dir=os.path.join(barcode_recovery_dir_merge, "out/"),
         log_dir=os.path.join(barcode_recovery_dir_merge, "logs/mge"),
-        ref_seqs_arg=lambda wildcards, input: f"--ref_seqs {input.ref_seqs}" if run_gene_fetch else ""
+        ref_seqs_arg=lambda wildcards, input: f"--ref_seqs {input.ref_seqs}" if run_gene_fetch else "",
+        contaminant_stats_arg=f"--contaminant-stats {os.path.join(preprocessing_dir_merge, 'contaminant_screen')}" if contaminant_screen_enabled else ""
     threads: rule_resources["extract_stats_to_csv"]["threads"]
     resources:
         mem_mb=lambda wildcards, attempt: rule_resources["extract_stats_to_csv"]["mem_mb"] * attempt
@@ -2318,7 +2707,7 @@ rule extract_stats_to_csv_merge:
         """
         set -euo pipefail
         # Run script
-        python {params.script} -a {input.alignment_log} -o {output.stats} -od {params.out_dir} -c {input.cleaning_csv} {params.ref_seqs_arg} --pre-fasta {input.pre_fasta} --post-fasta {input.post_fasta}
+        python {params.script} -a {input.alignment_log} -o {output.stats} -od {params.out_dir} -c {input.cleaning_csv} {params.ref_seqs_arg} --pre-fasta {input.pre_fasta} --post-fasta {input.post_fasta} {params.contaminant_stats_arg}
         # Relocate logs
         mv compile_barcoding_stats.log {params.log_dir}/
         """
@@ -2336,14 +2725,16 @@ rule extract_stats_to_csv_concat:
         cleaning_csv=os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/combined_statistics.csv"),
         cleaner_complete=os.path.join(barcode_recovery_dir_concat, "logs/fasta_cleaner_complete.txt"),
         post_fasta=os.path.join(barcode_recovery_dir_concat, "fasta_cleaner/cleaned_cons_combined.fasta"),
-        ref_seqs=os.path.join(main_output_dir, "02_references/sequence_references.csv") if run_gene_fetch else []
+        ref_seqs=os.path.join(main_output_dir, "02_references/sequence_references.csv") if run_gene_fetch else [],
+        contaminant_stats=expand(os.path.join(preprocessing_dir_concat, "contaminant_screen/{sample}/{sample}_contaminant_stats.txt"), sample=list(samples.keys())) if contaminant_screen_enabled else []
     output:
         stats=os.path.join(barcode_recovery_dir_concat, f"{run_name}_concat-stats.csv")
     params:
         script=os.path.join(workflow.basedir, "scripts/compile_barcoding_stats.py"),
         out_dir=os.path.join(barcode_recovery_dir_concat, "out/"),
         log_dir=os.path.join(barcode_recovery_dir_concat, "logs/mge"),
-        ref_seqs_arg=lambda wildcards, input: f"--ref_seqs {input.ref_seqs}" if run_gene_fetch else ""
+        ref_seqs_arg=lambda wildcards, input: f"--ref_seqs {input.ref_seqs}" if run_gene_fetch else "",
+        contaminant_stats_arg=f"--contaminant-stats {os.path.join(preprocessing_dir_concat, 'contaminant_screen')}" if contaminant_screen_enabled else ""
     threads: rule_resources["extract_stats_to_csv"]["threads"]
     resources:
         mem_mb=lambda wildcards, attempt: rule_resources["extract_stats_to_csv"]["mem_mb"] * attempt
@@ -2352,7 +2743,7 @@ rule extract_stats_to_csv_concat:
         """
         set -euo pipefail
         # Run script
-        python {params.script} -a {input.alignment_log} -o {output.stats} -od {params.out_dir} -c {input.cleaning_csv} {params.ref_seqs_arg} --pre-fasta {input.pre_fasta} --post-fasta {input.post_fasta}
+        python {params.script} -a {input.alignment_log} -o {output.stats} -od {params.out_dir} -c {input.cleaning_csv} {params.ref_seqs_arg} --pre-fasta {input.pre_fasta} --post-fasta {input.post_fasta} {params.contaminant_stats_arg}
         # Relocate logs
         mv compile_barcoding_stats.log {params.log_dir}/
         """
@@ -2406,7 +2797,8 @@ rule val_barcode_recovery_metrics_merge:
 if run_structural_validation and run_taxonomic_validation:
     rule barcoding_outcome:
         input:
-            final_metrics=os.path.join(main_output_dir, f"{run_name}_final_metrics.csv")
+            final_metrics=os.path.join(main_output_dir, f"{run_name}_final_metrics.csv"),
+            expected_taxonomy=taxonomic_validation_params["expected_taxonomy"]
         output:
             outcome_tsv=os.path.join(main_output_dir, "05_barcoding_outcome/barcoding_outcome.tsv")
         params:
@@ -2424,7 +2816,8 @@ if run_structural_validation and run_taxonomic_validation:
             mkdir -p $(dirname {output.outcome_tsv})
             
             python {params.script} \
-                --input {input.final_metrics} \
+                --metric {input.final_metrics} \
+                --taxonomy {input.expected_taxonomy} \
                 --output {output.outcome_tsv} \
                 --log {log}
             """
