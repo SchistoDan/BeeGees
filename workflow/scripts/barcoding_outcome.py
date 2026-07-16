@@ -24,13 +24,21 @@ ACCEPTED_ID_COLUMNS = [
     'process_id',
 ]
 
+# When multiple ID columns are found, prefer these (in priority order)
+PREFERRED_ID_COLUMNS = [
+    'process id',
+    'processid',
+    'process_id',
+]
+
 
 def find_id_column(fieldnames: list, file_label: str) -> str:
     """
     Find the ID column in a CSV header, case-insensitively.
 
-    Searches fieldnames against ACCEPTED_ID_COLUMNS. Raises an error if
-    zero or more than one accepted column is found.
+    Searches fieldnames against ACCEPTED_ID_COLUMNS. If multiple matches
+    are found, prefers Process ID variants. Raises an error if zero matches
+    are found, or if multiple matches remain after preference resolution.
 
     Args:
         fieldnames: List of column names from the CSV header
@@ -50,16 +58,28 @@ def find_id_column(fieldnames: list, file_label: str) -> str:
             f"{file_label}: no recognised ID column found. "
             f"Accepted column names (case-insensitive): {accepted}"
         )
-    if len(matches) > 1:
-        accepted = ', '.join(f"'{c}'" for c in ACCEPTED_ID_COLUMNS)
-        found = ', '.join(f"'{m}'" for m in matches)
-        raise ValueError(
-            f"{file_label}: multiple ID columns found: {found}. "
-            f"Please provide only one. "
-            f"Accepted column names (case-insensitive): {accepted}"
-        )
 
-    return matches[0]
+    if len(matches) == 1:
+        return matches[0]
+
+    # Multiple matches: prefer Process ID variants
+    preferred = [m for m in matches if m.strip().lower() in PREFERRED_ID_COLUMNS]
+
+    if len(preferred) == 1:
+        logging.getLogger("barcode_outcome").info(
+            f"{file_label}: multiple ID columns found ({', '.join(repr(m) for m in matches)}), "
+            f"defaulting to '{preferred[0]}'"
+        )
+        return preferred[0]
+
+    # Still ambiguous — raise error
+    found = ', '.join(f"'{m}'" for m in matches)
+    accepted = ', '.join(f"'{c}'" for c in ACCEPTED_ID_COLUMNS)
+    raise ValueError(
+        f"{file_label}: multiple ID columns found: {found}. "
+        f"Please provide only one. "
+        f"Accepted column names (case-insensitive): {accepted}"
+    )
 
 
 def setup_logging(log_path: str) -> logging.Logger:
@@ -99,17 +119,25 @@ def load_taxonomy_lookup(taxonomy_path: str, logger: logging.Logger) -> dict:
         id_col = find_id_column(reader.fieldnames, "Taxonomy CSV")
         logger.info(f"Using ID column: '{id_col}'")
 
-        # Check required taxonomy columns
+        # Build case-insensitive mapping for taxonomy columns
+        # Maps expected lowercase name -> actual header name
+        header_lower = {fn.strip().lower(): fn for fn in reader.fieldnames}
+        tax_col_map = {}
         for col in taxonomy_cols:
-            if col not in reader.fieldnames:
-                raise ValueError(f"Taxonomy CSV must contain '{col}' column")
+            if col in header_lower:
+                tax_col_map[col] = header_lower[col]
+            else:
+                raise ValueError(
+                    f"Taxonomy CSV must contain '{col}' column (case-insensitive). "
+                    f"Found columns: {', '.join(reader.fieldnames)}"
+                )
 
         for row in reader:
             process_id = row[id_col].strip()
 
             # Concatenate taxonomy columns with semicolon delimiter
             # Include empty fields (will result in consecutive semicolons if empty)
-            tax_values = [row.get(col, '').strip() for col in taxonomy_cols]
+            tax_values = [row.get(tax_col_map[col], '').strip() for col in taxonomy_cols]
             taxonomy_string = ';'.join(tax_values)
 
             taxonomy_lookup[process_id] = taxonomy_string

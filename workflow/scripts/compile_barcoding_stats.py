@@ -4,7 +4,7 @@ Barcode recovery summary tool
 
 This script analyses a log file containing a list of alignment FASTA files, .out files
 containing 'raw' summary stats from MGE, and cleaning statistics from a CSV file.
-It generates comprehensive summary statistics in CSV format with separate rows for 
+It generates comprehensive summary statistics in CSV format with separate rows for
 alignment data (from FASTA files) and cleaning data (from cleaning CSV).
 
 Usage:
@@ -25,14 +25,14 @@ Arguments:
         Path to multi-FASTA file containing pre-cleaning sequences for header extraction
     --post-fasta : str (optional)
         Path to multi-FASTA file containing post-cleaning sequences for header extraction
-    --contaminant-stats : str (optional)
-        Path to contaminant_screen directory containing per-sample contaminant stats files
     --clean : flag (optional)
         Remove all rows where fasta_header == 'null' from the output
 
 Auto-detection:
-    The script automatically detects "merge_mode" in file paths and appends "_merge" to 
-    the mge_params column accordingly.
+    The script automatically detects "merge_mode" or "concat_mode" in file paths and appends
+    "_merge" or "_concat" to the mge_params column accordingly, for FASTA-derived (alignment) rows.
+    Cleaning-derived rows already carry their mode suffix from the cleaning CSV sample_name itself,
+    via extract_cleaning_info(), so no additional handling is required there.
 
 Outputs:
     - <output_file>.csv: Main summary file containing all statistics
@@ -44,11 +44,9 @@ The script generates the following metrics for each sample:
     - mge_params: Parameters used for MGE (e.g., r_1.3_s_50)
     - fasta_header: FASTA header from pre/post-fasta files (if provided)
     - sample_taxid: Taxonomic ID of the sample from reference sequences
-    - ref_accession: Protein accession number from reference sequences  
+    - ref_accession: Protein accession number from reference sequences
     - ref_rank: Matched taxonomic rank from reference sequences
     - n_reads_in: Number of input sequences (from .out file)
-    - n_contam_reads_removed: Number of contaminant reads matched/removed
-    - pct_contam_removed: Percentage of reads identified as contaminants
     - n_reads_aligned: Number of aligned sequences (merged: FASTA alignment count or cleaning kept_reads)
     - n_reads_skipped: Number of sequences that were successfully aligned but not in the FASTA file
     - ref_length: Length of alignment (from .out file)
@@ -75,19 +73,32 @@ import numpy as np
 import glob
 
 
-# Set up logging
+# Set up logging. The log FileHandler is attached later, once --log-file has
+# been parsed from argv, so the log is written directly to its final path
+# rather than to a relative filename that then has to be mv'd by the caller.
 logger = logging.getLogger('compile_barcoding_stats')
 logger.setLevel(logging.INFO)
-# Use mode='w' to overwrite the log file each time
-file_handler = logging.FileHandler('compile_barcoding_stats.log', mode='w')
-file_handler.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
 console_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
 logger.addHandler(console_handler)
+
+
+def configure_file_logging(log_path):
+    """
+    Attach a FileHandler pointed at log_path (mode='w', overwriting each run).
+    log_path may be relative or absolute; its parent directory is created if
+    it doesn't already exist.
+    """
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler = logging.FileHandler(log_path, mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 def extract_sample_info(filename):
     """
@@ -99,18 +110,18 @@ def extract_sample_info(filename):
         - params: "r_1.3_s_50"
     """
     filename_no_ext = os.path.splitext(filename)[0]
-    
+
     # Extract base ID (everything before first underscore)
     base_id_match = re.match(r'^([^_]+)', filename_no_ext)
     base_id = base_id_match.group(1) if base_id_match else None
-    
+
     # Extract parameters (r_X_s_Y pattern)
     params_match = re.search(r'(r_[0-9.]+_s_[0-9.]+)', filename_no_ext)
     params = params_match.group(1) if params_match else ""
-    
+
     # Combine to form the full ID used for matching files
     full_id = f"{base_id}_{params}" if params else base_id
-    
+
     return base_id, full_id, params
 
 def extract_cleaning_info(sample_name):
@@ -118,33 +129,33 @@ def extract_cleaning_info(sample_name):
     Extract the process ID and parameters from cleaning CSV sample names.
     E.g., from "BSNHM002-24_r_1.3_s_50_BSNHM002-24_fcleaner_merge"
     Returns:
-        - base_id: "BSNHM002-24"  
+        - base_id: "BSNHM002-24"
         - mge_params: "r_1.3_s_50_fcleaner_merge"
     """
     logger.debug(f"extract_cleaning_info called with: '{sample_name}'")
-    
+
     # Extract base ID (everything before first underscore)
     base_id_match = re.match(r'^([^_]+)', sample_name)
     base_id = base_id_match.group(1) if base_id_match else None
-    
+
     # Extract r_X_s_Y pattern
     params_match = re.search(r'(r_[0-9.]+_s_[0-9.]+)', sample_name)
     basic_params = params_match.group(1) if params_match else ""
-    
+
     # Debug for decimal samples
     if 'r_' in sample_name:
         logger.info(f"Cleaned consensus mge_params extracting for: '{sample_name}'")
         logger.info(f"  base_id: '{base_id}'")
         logger.info(f"  basic_params: '{basic_params}'")
-    
+
     if not basic_params:
         logger.warning(f"No r_X_s_Y pattern found in cleaning sample: {sample_name}")
         return base_id, ""
-    
+
     # Find the suffix (everything after the second occurrence of base_id)
     base_id_pattern = f"_{base_id}_"
     second_occurrence = sample_name.find(base_id_pattern)
-    
+
     if second_occurrence != -1:
         suffix = sample_name[second_occurrence + len(base_id_pattern):]
         mge_params = f"{basic_params}_{suffix}" if suffix else basic_params
@@ -152,7 +163,7 @@ def extract_cleaning_info(sample_name):
     else:
         mge_params = basic_params
         logger.warning(f"Could not find base_id pattern '{base_id_pattern}' in {sample_name}")
-        
+
     return base_id, mge_params
 
 def extract_process_id(filename):
@@ -168,27 +179,27 @@ def extract_id_and_params_from_header(header):
     """
     # Remove the '>' if present
     clean_header = header.lstrip('>')
-    
+
     # Extract base ID (everything before first underscore)
     base_id_match = re.match(r'^([^_]+)', clean_header)
     base_id = base_id_match.group(1) if base_id_match else None
-    
+
     if not base_id:
         return None, None
-    
+
     # Extract r_X_s_Y pattern and everything after it
     params_match = re.search(r'(r_[0-9.]+_s_[0-9.]+.*)$', clean_header)
     if not params_match:
         return base_id, None
-    
+
     # The full params string includes everything after r_X_s_Y
     full_params = params_match.group(1)
-    
+
     # Remove the duplicate base_id if it appears in the params
     # Handle both cases: with trailing underscore (merge mode) and without (concat mode)
     base_id_with_underscore = f"_{base_id}_"  # "_BSNHM004-24_"
     base_id_at_end = f"_{base_id}$"           # "_BSNHM004-24" at end of string
-    
+
     if base_id_with_underscore in full_params:
         # Merge mode: r_X_s_Y_base_id_suffix -> r_X_s_Y_suffix
         parts = full_params.split(base_id_with_underscore)
@@ -203,7 +214,7 @@ def extract_id_and_params_from_header(header):
         mge_params = re.sub(base_id_at_end, '', full_params)
     else:
         mge_params = full_params
-    
+
     return base_id, mge_params
 
 def parse_fasta_headers(fasta_file_path):
@@ -212,16 +223,16 @@ def parse_fasta_headers(fasta_file_path):
     Returns a dictionary mapping (ID, mge_params) -> full_header_with_>.
     """
     header_lookup = {}
-    
+
     if not fasta_file_path or not os.path.exists(fasta_file_path):
         return header_lookup
-    
+
     try:
         with open(fasta_file_path, 'r', encoding='utf-8', errors='replace') as handle:
             for record in SeqIO.parse(handle, 'fasta'):
                 # Extract ID and mge_params from the header
                 header_id, mge_params = extract_id_and_params_from_header(record.id)
-                
+
                 if header_id and mge_params:
                     # Create lookup key from (ID, mge_params)
                     lookup_key = (header_id, mge_params)
@@ -230,95 +241,13 @@ def parse_fasta_headers(fasta_file_path):
                     logger.debug(f"Parsed header: {record.id} -> ID: {header_id}, params: {mge_params}")
                 else:
                     logger.warning(f"Could not parse header: {record.id}")
-        
+
         logger.info(f"Parsed {len(header_lookup)} headers from {fasta_file_path}")
-        
+
     except Exception as e:
         logger.error(f"Error parsing FASTA headers from {fasta_file_path}: {e}")
-    
-    return header_lookup
 
-def parse_contaminant_stats(contaminant_stats_dir):
-    """
-    Parse contaminant screening statistics from BBDuk output files.
-    
-    Expects directory structure: {contaminant_stats_dir}/{sample_id}/{sample_id}_contaminant_stats.txt
-    
-    Each stats file has lines like:
-        #Total	3621344
-        #Matched	114495	3.16167%
-    
-    Returns a dictionary mapping sample_id -> {
-        'n_contam_reads_removed': int,
-        'pct_contam_removed': float
-    }
-    """
-    contaminant_data = {}
-    
-    if not contaminant_stats_dir or not os.path.exists(contaminant_stats_dir):
-        logger.info(f"Contaminant stats directory not provided or does not exist: {contaminant_stats_dir}")
-        return contaminant_data
-    
-    # Find all contaminant stats files
-    stats_files = glob.glob(os.path.join(contaminant_stats_dir, "*", "*_contaminant_stats.txt"))
-    
-    if not stats_files:
-        logger.warning(f"No contaminant stats files found in: {contaminant_stats_dir}")
-        return contaminant_data
-    
-    logger.info(f"Found {len(stats_files)} contaminant stats files in: {contaminant_stats_dir}")
-    
-    for stats_file in stats_files:
-        try:
-            # Extract sample ID from directory name
-            sample_id = os.path.basename(os.path.dirname(stats_file))
-            
-            n_reads_total = None
-            n_contam_reads_removed = None
-            pct_contam_removed = None
-            
-            with open(stats_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    
-                    # Parse #Total line: "#Total\t3621344"
-                    if line.startswith('#Total\t'):
-                        parts = line.split('\t')
-                        if len(parts) >= 2:
-                            try:
-                                n_reads_total = int(parts[1])
-                            except ValueError:
-                                logger.warning(f"Could not parse #Total value in {stats_file}: {parts[1]}")
-                    
-                    # Parse #Matched line: "#Matched\t114495\t3.16167%"
-                    elif line.startswith('#Matched\t'):
-                        parts = line.split('\t')
-                        if len(parts) >= 3:
-                            try:
-                                n_contam_reads_removed = int(parts[1])
-                            except ValueError:
-                                logger.warning(f"Could not parse #Matched count in {stats_file}: {parts[1]}")
-                            try:
-                                # Remove the '%' suffix
-                                pct_contam_removed = float(parts[2].rstrip('%'))
-                            except ValueError:
-                                logger.warning(f"Could not parse #Matched percentage in {stats_file}: {parts[2]}")
-            
-            if n_reads_total is not None:
-                contaminant_data[sample_id] = {
-                    'n_contam_reads_removed': n_contam_reads_removed if n_contam_reads_removed is not None else 'null',
-                    'pct_contam_removed': round(pct_contam_removed, 5) if pct_contam_removed is not None else 'null'
-                }
-                logger.debug(f"Parsed contaminant stats for {sample_id}: total={n_reads_total}, "
-                           f"matched={n_contam_reads_removed}, pct={pct_contam_removed}")
-            else:
-                logger.warning(f"Could not parse #Total from contaminant stats file: {stats_file}")
-                
-        except Exception as e:
-            logger.error(f"Error reading contaminant stats file {stats_file}: {e}")
-    
-    logger.info(f"Parsed contaminant stats for {len(contaminant_data)} samples")
-    return contaminant_data
+    return header_lookup
 
 def parse_out_file(out_file_path):
     """Parse the .out file for additional statistics."""
@@ -339,17 +268,17 @@ def parse_out_file(out_file_path):
     reads_in_match = re.search(r'Number of input sequences:\s*(\d+)', content)
     if reads_in_match:
         process_id_data['n_reads_in'] = int(reads_in_match.group(1))
-    
+
     # Simplified pattern - just target the line with the number
     aligned_match = re.search(r'to the amino acid sequence, see vulgar file:\s*(\d+)', content)
     if aligned_match:
         process_id_data['successful_aligned'] = int(aligned_match.group(1))
-    
+
     # Reference length pattern
     ref_length_match = re.search(r'Length of alignment:\s*(\d+)', content)
     if ref_length_match:
         process_id_data['ref_length'] = int(ref_length_match.group(1))
- 
+
     return process_id_data
 
 def parse_cleaning_csv(file_path):
@@ -376,17 +305,17 @@ def parse_cleaning_csv(file_path):
                         'cov_min': float(row.get('cov_min', 0)),
                         'cov_med': float(row.get('cov_med', 0))
                     }
-                    
+
                     # Store under original sample name only
                     cleaning_data[sample_name] = cleaning_stats
-            
+
         logger.info(f"Parsed cleaning data for {len(cleaning_data)} samples from CSV")
         return cleaning_data
-            
+
     except Exception as e:
         logger.error(f"Error reading cleaning CSV file {file_path}: {e}")
         return {}
-        
+
 def parse_ref_seqs_csv(file_path):
     """Parse the reference sequences CSV file for taxid, accession, and rank information."""
     ref_data = {}
@@ -402,10 +331,10 @@ def parse_ref_seqs_csv(file_path):
                         'matched_rank': row.get('matched_rank', '').strip()
                     }
                     ref_data[process_id] = ref_stats
-        
+
         logger.info(f"Parsed reference sequence data for {len(ref_data)} samples from CSV")
         return ref_data
-            
+
     except Exception as e:
         logger.error(f"Error reading reference sequences CSV file {file_path}: {e}")
         return {}
@@ -413,7 +342,7 @@ def parse_ref_seqs_csv(file_path):
 def process_fasta_file(file_path):
     """Process a FASTA file and extract sequence statistics."""
     logger.info(f"Processing file: {file_path}")  # Log which file is being processed
-    
+
     if os.path.getsize(file_path) == 0:
         base_id, _, _ = extract_sample_info(os.path.basename(file_path))
         logger.warning(f"Empty file: {file_path}")
@@ -457,7 +386,7 @@ def process_fasta_file(file_path):
     for seq in sequences:
         if seq.id not in unique_sequences:
             unique_sequences[seq.id] = seq
-    
+
     # Detect sequence length mismatches
     sequence_lengths = [len(seq.seq) for seq in unique_sequences.values()]
     if len(set(sequence_lengths)) > 1:
@@ -465,16 +394,16 @@ def process_fasta_file(file_path):
         # Log some example sequence IDs with their lengths
         for seq_id, seq in list(unique_sequences.items())[:5]:  # Log up to 5 examples
             logger.error(f"  Sequence {seq_id}: length {len(seq.seq)}")
-        
+
         # Use the most common length
         from collections import Counter
         most_common_length = Counter(sequence_lengths).most_common(1)[0][0]
         logger.info(f"Using most common length: {most_common_length} for file {file_path}")
-        
+
         # Filter sequences to only include those with the most common length
-        filtered_sequences = {seq_id: seq for seq_id, seq in unique_sequences.items() 
+        filtered_sequences = {seq_id: seq for seq_id, seq in unique_sequences.items()
                              if len(seq.seq) == most_common_length}
-        
+
         if not filtered_sequences:
             logger.error(f"No sequences with common length in {file_path}")
             base_id, _, _ = extract_sample_info(os.path.basename(file_path))
@@ -486,16 +415,16 @@ def process_fasta_file(file_path):
                 'cov_avg': 0.00,
                 'cov_med': 0.00,
             }
-        
+
         logger.info(f"Filtered from {len(unique_sequences)} to {len(filtered_sequences)} sequences")
         unique_sequences = filtered_sequences
 
     sequence_count = len(unique_sequences)
-    
+
     try:
         first_seq = next(iter(unique_sequences.values()))
         coverage = np.zeros(len(first_seq.seq))
-        
+
         for seq_id, seq in unique_sequences.items():
             try:
                 seq_array = np.array([1 if base != '-' else 0 for base in seq.seq])
@@ -517,7 +446,7 @@ def process_fasta_file(file_path):
             median_coverage = np.median(coverage)
         else:
             min_coverage = max_coverage = mean_coverage = median_coverage = 0
-            
+
     except Exception as e:
         logger.error(f"Error calculating coverage for file {file_path}: {e}")
         base_id, _, _ = extract_sample_info(os.path.basename(file_path))
@@ -541,12 +470,12 @@ def process_fasta_file(file_path):
         'cov_med': round(median_coverage, 2),
     }
 
-def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_seqs_csv=None,
-                    pre_fasta=None, post_fasta=None, clean_null_headers=False, contaminant_stats_dir=None):
-    """Summarise FASTA files based on log file with cleaning statistics from CSV and auto-detect merge mode."""
-    
-    # Auto-detect merge mode from file paths
+def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_seqs_csv=None, pre_fasta=None, post_fasta=None, clean_null_headers=False):
+    """Summarise FASTA files based on log file with cleaning statistics from CSV and auto-detect merge/concat mode."""
+
+    # Auto-detect merge mode and concat mode from file paths
     merge_mode = False
+    concat_mode = False
     paths_to_check = [output_file, log_file, out_file_dir]
     if cleaning_csv:
         paths_to_check.append(cleaning_csv)
@@ -556,12 +485,20 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
         paths_to_check.append(pre_fasta)
     if post_fasta:
         paths_to_check.append(post_fasta)
-    
+
     for path in paths_to_check:
         if path and 'merge_mode' in str(path).lower():
             merge_mode = True
             logger.debug(f"Merge mode detected from path: {path}")
             break
+
+    if not merge_mode:
+        for path in paths_to_check:
+            if path and 'concat_mode' in str(path).lower():
+                concat_mode = True
+                logger.debug(f"Concat mode detected from path: {path}")
+                break
+
     try:
         with open(log_file, 'r') as f:
             file_paths = [line.strip() for line in f if line.strip().endswith(('.fasta', '.fas'))]
@@ -571,7 +508,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
 
     # Log file information
     logger.info(f"The input log_file contains paths to {len(file_paths)} files for processing")
-    
+
     if not file_paths:
         logger.warning(f"No valid FASTA files found in log file: {log_file}")
         return
@@ -579,30 +516,32 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
     # Extract and log sample names
     sample_info = [extract_sample_info(os.path.basename(path)) for path in file_paths]
     base_ids = [info[0] for info in sample_info if info[0]]
-    
+
     logger.info(f"Sample base IDs found: {', '.join(set(base_ids))}")
     logger.info(f"Total number of samples being processed: {len(file_paths)}")
 
-    # Parse FASTA headers if provided
+    # Parse FASTA headers if provided - NEW LOGIC
     fasta_headers_lookup = {}
     if pre_fasta:
         logger.info(f"Parsing pre-fasta headers from: {pre_fasta}")
         pre_headers = parse_fasta_headers(pre_fasta)
         fasta_headers_lookup.update(pre_headers)
-    
+
     if post_fasta:
         logger.info(f"Parsing post-fasta headers from: {post_fasta}")
         post_headers = parse_fasta_headers(post_fasta)
         # Post-fasta headers override pre-fasta if there are duplicates
         fasta_headers_lookup.update(post_headers)
-    
+
     logger.info(f"Total FASTA headers available for matching: {len(fasta_headers_lookup)}")
-    
-    # Log merge mode status
+
+    # Log mode status
     if merge_mode:
         logger.info("Merge mode auto-detected from file paths: will append '_merge' to mge_params column")
+    elif concat_mode:
+        logger.info("Concat mode auto-detected from file paths: will append '_concat' to mge_params column")
     else:
-        logger.info("Merge mode not detected: no suffix modification")
+        logger.info("Neither merge_mode nor concat_mode detected: no suffix modification")
 
     # Log clean flag status
     if clean_null_headers:
@@ -610,17 +549,10 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
     else:
         logger.info("Clean mode disabled: all rows will be included in output")
 
-    # Parse contaminant screening stats
-    contaminant_data = parse_contaminant_stats(contaminant_stats_dir)
-    if contaminant_data:
-        logger.info(f"Contaminant stats loaded for {len(contaminant_data)} samples from: {contaminant_stats_dir}")
-    else:
-        logger.info("No contaminant stats available - columns will be set to 'null'")
-
     # Get alignment stats from .out files
     out_files = [f for f in os.listdir(out_file_dir) if f.endswith('.out')]
     logger.info(f"The out_file_dir contains {len(out_files)} .out files for processing")
-    
+
     out_file_data = {}
     for file in out_files:
         _, full_id, _ = extract_sample_info(file)
@@ -628,7 +560,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
             out_data = parse_out_file(os.path.join(out_file_dir, file))
             if out_data:
                 out_file_data[full_id] = out_data
-    
+
     # Get cleaning stats from CSV file
     cleaning_data = {}
     if cleaning_csv and os.path.exists(cleaning_csv):
@@ -643,11 +575,10 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
     else:
         logger.warning(f"Reference sequences CSV file not provided or does not exist")
 
-    # Updated fieldnames with contaminant screening columns between n_reads_in and n_reads_aligned
+    # Updated fieldnames with fasta_header column added after mge_params
     fieldnames = [
         'Filename', 'ID', 'mge_params', 'fasta_header', 'sample_taxid', 'ref_accession', 'ref_rank',
-        'n_reads_in', 'n_contam_reads_removed', 'pct_contam_removed',
-        'n_reads_aligned', 'n_reads_skipped', 'ref_length',
+        'n_reads_in', 'n_reads_aligned', 'n_reads_skipped', 'ref_length',
         'cov_min', 'cov_max', 'cov_avg', 'cov_med',
         'cleaning_removed_human', 'cleaning_removed_at', 'cleaning_removed_outlier',
         'cleaning_removed_reference', 'cleaning_ambig_bases', 'cleaning_cov_percent'
@@ -679,13 +610,18 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
                 result['ref_rank'] = ref_stats.get('matched_rank', 'null')
                 result['mge_params'] = params if params else 'null'
 
-                # Apply merge mode suffix if requested
+                # Apply mode suffix if requested. Merge and concat are handled symmetrically:
+                # both must produce mge_params matching the suffix baked into the actual
+                # combined-consensus FASTA headers (via extract_id_and_params_from_header),
+                # or the (ID, mge_params) lookup below will never resolve for that mode.
                 if merge_mode:
-                    # Append '_merge' to mge_params if not already present
                     if params and not params.endswith('_merge'):
                         result['mge_params'] = f"{params}_merge"
+                elif concat_mode:
+                    if params and not params.endswith('_concat'):
+                        result['mge_params'] = f"{params}_concat"
 
-                # Look up FASTA header using (ID, mge_params) combination
+                # NEW LOGIC: Look up FASTA header using (ID, mge_params) combination
                 lookup_key = (base_id, result['mge_params'])
                 result['fasta_header'] = fasta_headers_lookup.get(lookup_key, 'null')
                 logger.debug(f"Looking up header for {lookup_key}: {result['fasta_header']}")
@@ -694,21 +630,15 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
                 out_data = out_file_data.get(full_id, {})
                 result['n_reads_in'] = out_data.get('n_reads_in', 'null')
                 result['ref_length'] = out_data.get('ref_length', 'null')
-                
+
                 # Calculate n_reads_skipped (successful_aligned - n_reads_aligned)
                 successful_aligned = out_data.get('successful_aligned', None)
                 n_reads_aligned = result.get('n_reads_aligned', 0)
-                
+
                 if successful_aligned is not None and n_reads_aligned is not None:
                     result['n_reads_skipped'] = max(0, successful_aligned - n_reads_aligned)
                 else:
                     result['n_reads_skipped'] = 'null'
-
-                # Add contaminant screening stats based on sample ID
-                # The contaminant_stats_dir is already mode-specific (passed per rule invocation)
-                contam_stats = contaminant_data.get(base_id, {})
-                result['n_contam_reads_removed'] = contam_stats.get('n_contam_reads_removed', 'null')
-                result['pct_contam_removed'] = contam_stats.get('pct_contam_removed', 'null')
 
                 # Set all cleaning columns to "null" for FASTA-derived rows
                 result['cleaning_removed_human'] = 'null'
@@ -729,22 +659,22 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
 
         # Process cleaning CSV entries - create separate rows with cleaning stats and alignment columns set to "null"
         logger.info(f"Starting to process {len(cleaning_data)} cleaning data entries")
-        
+
         processed_count = 0
         skipped_count = 0
-        
+
         for sample_name, cleaning_stats in cleaning_data.items():
             logger.debug(f"Processing cleaning entry: {sample_name}")
-            
+
             # Skip the duplicate keys we created during parsing - only process original sample names
             if not ('_fcleaner' in sample_name or '_merge' in sample_name):
                 logger.debug(f"Skipping {sample_name} - no _fcleaner or _merge")
                 skipped_count += 1
                 continue
-                
+
             # Extract base_id and mge_params using extract_cleaning_info function
             base_id, mge_params = extract_cleaning_info(sample_name)
-            
+
             if not base_id:
                 logger.warning(f"Could not extract base_id from cleaning sample name: {sample_name}")
                 continue
@@ -756,7 +686,7 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
             cleaning_result = {}
             cleaning_result['Filename'] = sample_name
             cleaning_result['ID'] = base_id
-            
+
             # Get reference data if available
             ref_stats = ref_data.get(base_id, {})
             cleaning_result['sample_taxid'] = ref_stats.get('first_matched_taxid', 'null')
@@ -764,13 +694,15 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
             cleaning_result['ref_rank'] = ref_stats.get('matched_rank', 'null')
             cleaning_result['mge_params'] = mge_params if mge_params else 'null'
 
-            # Apply merge mode suffix if requested
+            # Cleaning-derived sample names already carry their mode suffix (e.g.
+            # "..._fcleaner_merge" / "..._fcleaner_concat") straight from the cleaning
+            # CSV, via extract_cleaning_info(), so no additional merge/concat handling
+            # is applied here (unlike the FASTA-derived block above).
             if merge_mode:
-                # Append '_merge' to mge_params if not already present
                 if mge_params and not mge_params.endswith('_merge'):
                     cleaning_result['mge_params'] = f"{mge_params}_merge"
 
-            # Look up FASTA header using (ID, mge_params) combination
+            # NEW LOGIC: Look up FASTA header using (ID, mge_params) combination
             lookup_key = (base_id, cleaning_result['mge_params'])
             cleaning_result['fasta_header'] = fasta_headers_lookup.get(lookup_key, 'null')
             logger.debug(f"Looking up header for {lookup_key}: {cleaning_result['fasta_header']}")
@@ -780,16 +712,10 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
             cleaning_result['n_reads_skipped'] = 'null'
             cleaning_result['ref_length'] = 'null'
 
-            # Add contaminant screening stats based on sample ID
-            # The contaminant_stats_dir is already mode-specific (passed per rule invocation)
-            contam_stats = contaminant_data.get(base_id, {})
-            cleaning_result['n_contam_reads_removed'] = contam_stats.get('n_contam_reads_removed', 'null')
-            cleaning_result['pct_contam_removed'] = contam_stats.get('pct_contam_removed', 'null')
-
             # MERGED COLUMNS: Use cleaning values in the merged column names
             # cleaning_kept_reads -> n_reads_aligned
             cleaning_result['n_reads_aligned'] = cleaning_stats.get('kept_reads', 'null')
-            
+
             # Coverage columns: cleaning_cov_* -> cov_*
             cleaning_result['cov_min'] = round(cleaning_stats.get('cov_min', 0), 2) if 'cov_min' in cleaning_stats else 'null'
             cleaning_result['cov_max'] = round(cleaning_stats.get('cov_max', 0), 2) if 'cov_max' in cleaning_stats else 'null'
@@ -816,12 +742,12 @@ def summarise_fasta(log_file, output_file, out_file_dir, cleaning_csv=None, ref_
         logger.info(f"Finished processing cleaning data: {processed_count} processed, {skipped_count} skipped")
 
     output_file_abs = os.path.abspath(output_file)
-    
+
     # Log summary of cleaning results
     if clean_null_headers:
         logger.info(f"Clean mode summary: {skipped_rows} rows skipped out of {total_rows} total rows due to null fasta_header")
         logger.info(f"Final output contains {total_rows - skipped_rows} rows")
-    
+
     logger.info(f"CSV summary created: {output_file_abs}")
     print(f"CSV summary created: '{output_file}'.")
 
@@ -834,10 +760,13 @@ if __name__ == "__main__":
     parser.add_argument('--ref_seqs', type=str, help='Path to CSV file containing reference sequence information (taxid, accession, rank)')
     parser.add_argument('--pre-fasta', type=str, help='Path to multi-FASTA file containing pre-cleaning sequences for header extraction')
     parser.add_argument('--post-fasta', type=str, help='Path to multi-FASTA file containing post-cleaning sequences for header extraction')
-    parser.add_argument('--contaminant-stats', type=str, help='Path to contaminant_screen directory containing per-sample contaminant stats files')
     parser.add_argument('--clean', action='store_true', help='Remove all rows where fasta_header == null from the output')
+    parser.add_argument('--log-file', type=str, default='compile_barcoding_stats.log',
+                         help='Path to write the compile_barcoding_stats.log file to (default: compile_barcoding_stats.log in the current working directory)')
 
     args = parser.parse_args()
+
+    configure_file_logging(args.log_file)
 
     if not os.path.isfile(args.alignment_log):
         parser.error(f"The log file '{args.alignment_log}' does not exist.")
@@ -851,9 +780,5 @@ if __name__ == "__main__":
         parser.error(f"The pre-fasta file '{getattr(args, 'pre_fasta')}' does not exist.")
     if getattr(args, 'post_fasta') and not os.path.isfile(getattr(args, 'post_fasta')):
         parser.error(f"The post-fasta file '{getattr(args, 'post_fasta')}' does not exist.")
-    if args.contaminant_stats and not os.path.isdir(args.contaminant_stats):
-        parser.error(f"The contaminant stats directory '{args.contaminant_stats}' does not exist or is not a directory.")
 
-    summarise_fasta(args.alignment_log, args.output, args.out_file_dir, args.cleaning_csv, args.ref_seqs,
-                    getattr(args, 'pre_fasta', None), getattr(args, 'post_fasta', None), args.clean,
-                    getattr(args, 'contaminant_stats', None))
+    summarise_fasta(args.alignment_log, args.output, args.out_file_dir, args.cleaning_csv, args.ref_seqs, getattr(args, 'pre_fasta', None), getattr(args, 'post_fasta', None), args.clean)

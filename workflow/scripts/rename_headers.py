@@ -69,7 +69,10 @@ def process_file(file_info):
         con_suffix = base_name.split('con_')[-1].replace('.fas', '')
         
         # Add suffix based on preprocessing mode
-        suffix = "_merge" if preprocessing_mode == "merge" else ""
+        # Explicit mode suffix for all preprocessing modes (concat/merge/se).
+        # Previously concat was left unmarked; it now carries "_concat" so that
+        # provenance is unambiguous in the combined consensus FASTA.
+        suffix = f"_{preprocessing_mode}"
         
         # Read input file content and prepare output content with renamed headers
         output_content = []
@@ -262,7 +265,7 @@ def main():
     # Required arguments
     parser.add_argument('--complete-file', required=True, help='Path to write completion status')
     parser.add_argument('--log-file', required=True, help='Path to log file')
-    parser.add_argument('--preprocessing-mode', default='concat', choices=['concat', 'merge'], 
+    parser.add_argument('--preprocessing-mode', default='concat', choices=['concat', 'merge', 'se'], 
                         help='Preprocessing mode (concat or merge)')
     parser.add_argument('--threads', type=int, default=1, help='Number of threads to use')
     

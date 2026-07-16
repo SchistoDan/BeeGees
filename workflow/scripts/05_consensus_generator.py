@@ -245,10 +245,10 @@ def process_single_file(file_path: str, consensus_threshold: float, preprocessin
         ambiguous_bases = count_ambiguous_bases(consensus_seq)
         consensus_length = len(consensus_seq.replace('-', ''))
         
-        # Create consensus record with appropriate naming
-        consensus_id = f"{base_name}_fcleaner"
-        if preprocessing_mode == 'merge':
-            consensus_id += "_merge"
+        # Create consensus record with appropriate naming.
+        # Post-clean headers carry an explicit mode suffix for all modes:
+        # _fcleaner_concat / _fcleaner_merge / _fcleaner_se
+        consensus_id = f"{base_name}_fcleaner_{preprocessing_mode}"
         
         consensus_record = SeqRecord(
             Seq(consensus_seq),
@@ -309,7 +309,7 @@ def main():
     parser.add_argument('--consensus-fasta', required=True, help='Output concatenated consensus FASTA file')
     parser.add_argument('--consensus-metrics', required=True, help='Filename for consensus metrics CSV (will be placed in output directory)')
     parser.add_argument('--consensus-threshold', type=float, default=0.5, help='Consensus generation threshold')
-    parser.add_argument('--preprocessing-mode', choices=['merge', 'concat'], default='concat', 
+    parser.add_argument('--preprocessing-mode', choices=['merge', 'concat', 'se'], default='concat', 
                        help='Preprocessing mode for naming')
     parser.add_argument('--threads', type=int, default=1, help='Number of threads for parallel processing')
     
@@ -403,10 +403,8 @@ def main():
         ])
         
         for result in results:
-            # Create sample_name with _fcleaner suffix
-            sample_name = f"{result['base_name']}_fcleaner"
-            if args.preprocessing_mode == 'merge':
-                sample_name += "_merge"
+            # Create sample_name with explicit _fcleaner_<mode> suffix
+            sample_name = f"{result['base_name']}_fcleaner_{args.preprocessing_mode}"
                 
             writer.writerow([
                 sample_name,

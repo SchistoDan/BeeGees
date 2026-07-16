@@ -31,7 +31,9 @@ def normalise_base_name(name: str) -> tuple:
     Returns: (normalised_name, removed_suffix)"""
     # Remove suffixes in order of priority (longest first to avoid partial matches)
     suffixes_to_remove = [
+        '_fcleaner_concat',
         '_fcleaner_merge',
+        '_fcleaner_se',
         '_fcleaner',
         '_human_filtered',
         '_at_filtered', 
@@ -50,47 +52,23 @@ def normalise_base_name(name: str) -> tuple:
     
     return normalised, removed_suffix
 
-def detect_delimiter(csv_file: str) -> str:
-    """Detect whether a CSV file uses tab or comma as delimiter.
-    Returns the detected delimiter character."""
-    try:
-        with open(csv_file, 'r') as f:
-            first_line = f.readline()
-            # Count tabs vs commas in header line
-            tab_count = first_line.count('\t')
-            comma_count = first_line.count(',')
-            
-            if tab_count > comma_count:
-                return '\t'
-            else:
-                return ','
-    except Exception:
-        return ','  # Default to comma
-
 def parse_human_metrics(csv_file: str) -> Dict[str, Dict]:
-    """Parse human mitogenome filter metrics CSV (tab or comma delimited).
-    
-    Expected columns: file_path, sequence_id, removal_reason, mapped_to_human,
-                      step_name, input_count, kept_count, removed_count
-    
-    Uses 'sequence_id' as the sample identifier for matching with other metrics.
-    """
+    """Parse human COX1 filter metrics CSV"""
     metrics = {}
     try:
-        delimiter = detect_delimiter(csv_file)
         with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = csv.DictReader(f)
             for row in reader:
-                # Use sequence_id as the sample identifier
-                sample_id = row.get('sequence_id', row.get('base_name', ''))
-                if sample_id:
-                    normalised_name, removed_suffix = normalise_base_name(sample_id)
-                    metrics[normalised_name] = {
-                        'input_reads': int(row.get('input_count', 0) or 0),
-                        'removed_human': int(row.get('removed_count', 0) or 0),
-                        'original_name': sample_id,
-                        'removed_suffix': removed_suffix
-                    }
+                if row.get('sequence_id') == 'FILE_SUMMARY':
+                    base_name = row.get('base_name', '')
+                    if base_name:
+                        normalised_name, removed_suffix = normalise_base_name(base_name)
+                        metrics[normalised_name] = {
+                            'input_reads': int(row.get('input_count', 0) or 0),
+                            'removed_human': int(row.get('removed_count', 0) or 0),
+                            'original_name': base_name,
+                            'removed_suffix': removed_suffix
+                        }
     except Exception as e:
         print(f"Warning: Could not read human metrics {csv_file}: {str(e)}")
     return metrics
@@ -99,9 +77,8 @@ def parse_at_metrics(csv_file: str) -> Dict[str, Dict]:
     """Parse AT content filter metrics CSV"""
     metrics = {}
     try:
-        delimiter = detect_delimiter(csv_file)
         with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = csv.DictReader(f)
             for row in reader:
                 sample_name = row.get('sample_name', '')
                 if sample_name:
@@ -119,9 +96,8 @@ def parse_outlier_metrics(csv_file: str) -> Dict[str, Dict]:
     """Parse statistical outlier filter metrics CSV"""
     metrics = {}
     try:
-        delimiter = detect_delimiter(csv_file)
         with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = csv.DictReader(f)
             for row in reader:
                 base_name = row.get('base_name', '')
                 if base_name:
@@ -139,9 +115,8 @@ def parse_reference_metrics(csv_file: str) -> Dict[str, Dict]:
     """Parse reference filter metrics CSV"""
     metrics = {}
     try:
-        delimiter = detect_delimiter(csv_file)
         with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = csv.DictReader(f)
             
             for row in reader:
                 # Only process FILE_SUMMARY records
@@ -174,9 +149,8 @@ def parse_consensus_metrics(csv_file: str) -> Dict[str, Dict]:
     """Parse consensus generation metrics CSV"""
     metrics = {}
     try:
-        delimiter = detect_delimiter(csv_file)
         with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
+            reader = csv.DictReader(f)
             for row in reader:
                 sample_name = row.get('sample_name', '')
                 if sample_name:

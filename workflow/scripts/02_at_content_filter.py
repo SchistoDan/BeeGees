@@ -20,38 +20,12 @@ Filtering Modes:
 - higher: Remove only sequences with AT content above consensus + threshold  
 - lower: Remove only sequences with AT content below consensus - threshold
 
-Output Structure:
-----------------
-The tool creates the following output structure in the specified output directory:
-
-output_dir/
-├── at_filtered_sequences/          # Individual filtered FASTA files
-│   ├── sample1_at_filtered.fasta
-│   ├── sample2_at_filtered.fasta
-│   └── ...
-├── metrics/                       # Individual sample metrics
-│   ├── sample1_at_metrics.csv
-│   ├── sample2_at_metrics.csv
-│   └── ...
-├── logs/                          # Processing logs
-│   ├── sample1_log.txt
-│   ├── sample2_log.txt
-│   ├── at_filter_main.log         # Main processing log
-│   └── ...
-├── at_filtered_paths.log          # Paths to all filtered files (one per line) [customisable name]
-└── at_filter_summary.csv          # Summary statistics
-
 Key Output Files:
 ----------------
 - {filtered_files_list}: Contains full paths to all successfully filtered alignment files,
   one per line. Use this file as input to downstream tools.
 - at_filter_summary.csv: Sample-level summary statistics
-
 Note: The filtered files list name can be customised using --filtered-files-list argument.
-
-Authors: B. Price & D. Parsons @ NHMUK (AT Content Filter Version)
-Version: 1.2.0
-Licence: MIT
 """
 
 # =============================================================================

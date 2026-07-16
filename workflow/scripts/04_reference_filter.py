@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-===>BWA-Based Reference Sequence Filter<===
+BWA-Based Reference Sequence Filter
 
 A tool for filtering DNA sequences based on their similarity to reference 
-sequences using BWA (Burrows-Wheeler Aligner) mapping. This script can either remove 
+sequences using BWA mapping. This script can either remove 
 contaminating sequences that map to known references or retain only sequences that match 
 specific reference patterns.
 
@@ -17,9 +17,8 @@ specific reference patterns.
    - 'keep_similar': Keep mapped sequences (retain sequences matching references)
 7. Write filtered sequences and detailed metrics
 
-
 USAGE:
-    python bwa_reference_filter.py \\
+    python 04_reference_filter.py \\
         --input-files-list input_files.txt \\
         --output-dir filtered_sequences/ \\
         --filtered-files-list filtered_output.txt \\
@@ -39,16 +38,6 @@ File naming:
 Input files should follow pattern: {sample_name}_r_{number}_s_{number}_{additional_info}.fasta
 - Sample name (e.g., "BSNHM089-24") used to find reference file
 - Full basename preserved in output filenames with "_reference_filtered" suffix
-
-Dependencies:
-- BWA: Burrows-Wheeler Aligner (must be in PATH)
-- samtools: For alignment statistics (must be in PATH)
-- BioPython: For FASTA file parsing and writing
-- Python 3.6+: For type hints and modern features
-
-AUTHORS: Dan Parsons & Ben Price @ NHMUK.
-VERSION: 2.0.0
-LICENSE: MIT
 """
 
 import os
@@ -69,7 +58,6 @@ from datetime import datetime
 from collections import Counter
 
 def log_message(message: str, log_file=None, stdout=False):
-    """Log message to file and optionally stdout"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     formatted_msg = f"[{timestamp}] {message}"
     
@@ -81,7 +69,6 @@ def log_message(message: str, log_file=None, stdout=False):
         print(formatted_msg, flush=True)
         
 def get_sample_name_for_reference(filepath: str) -> str:
-    """Extract just the sample name for finding reference files"""
     basename = os.path.basename(filepath)
     
     # Remove file extensions
@@ -101,7 +88,6 @@ def get_sample_name_for_reference(filepath: str) -> str:
     return basename
 
 def get_output_basename(filepath: str) -> str:
-    """Extract full basename preserving r/s pattern for output filename"""
     basename = os.path.basename(filepath)
     
     # Remove file extensions
@@ -119,7 +105,6 @@ def get_output_basename(filepath: str) -> str:
     return basename
 
 def run_command(cmd: List[str], check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess:
-    """Run a shell command with error handling"""
     try:
         if capture_output:
             result = subprocess.run(cmd, check=check, capture_output=True, text=True)
@@ -132,7 +117,6 @@ def run_command(cmd: List[str], check: bool = True, capture_output: bool = False
         raise RuntimeError(f"Command not found: {cmd[0]}. Please ensure BWA and samtools are installed.")
 
 def create_bwa_index_safely(reference_file: str) -> bool:
-    """Safely create BWA index with file locking to prevent conflicts"""
     # Check if index already exists
     index_files = [f"{reference_file}{ext}" for ext in ['.amb', '.ann', '.bwt', '.pac', '.sa']]
     if all(os.path.exists(f) for f in index_files):
@@ -195,7 +179,6 @@ def create_bwa_index_safely(reference_file: str) -> bool:
     return False
 
 def create_ungapped_fasta(input_file: str, output_file: str) -> int:
-    """Remove gaps from FASTA sequences and write to output file"""
     sequence_count = 0
     with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
         for record in SeqIO.parse(infile, 'fasta'):
@@ -206,7 +189,6 @@ def create_ungapped_fasta(input_file: str, output_file: str) -> int:
     return sequence_count
 
 def parse_sam_file(sam_file: str) -> Dict[str, bool]:
-    """Parse SAM file and extract unmapped status for each sequence"""
     mapping_info = {}
     
     with open(sam_file, 'r') as f:
@@ -228,7 +210,6 @@ def parse_sam_file(sam_file: str) -> Dict[str, bool]:
     return mapping_info
 
 def get_flagstat_info(sam_file: str) -> Dict[str, int]:
-    """Get mapping statistics using samtools flagstat"""
     try:
         result = run_command(['samtools', 'flagstat', sam_file], capture_output=True)
         lines = result.stdout.strip().split('\n')
@@ -247,7 +228,6 @@ def get_flagstat_info(sam_file: str) -> Dict[str, int]:
 
 def process_single_file(file_path: str, reference_dir: str, filter_mode: str,
                        output_dir: str, bwa_params: Dict) -> Dict:
-    """Process a single FASTA file for BWA-based reference filtering"""
     try:
         # Get sample name for finding reference (e.g., "BSNHM089-24")
         sample_name = get_sample_name_for_reference(file_path)
@@ -486,7 +466,6 @@ def main():
     parser.add_argument('--threads', type=int, default=1, help='Number of threads for parallel processing')
     
     # BWA parameters - using defaults except for -M which helps with multi-mapping contamination detection
-    
     args = parser.parse_args()
     
     # Create output directory

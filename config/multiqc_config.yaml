@@ -1,0 +1,22 @@
+# =========================================
+# MultiQC Configuration - BeeGees Pipeline
+# =========================================
+
+title: "BeeGees Pipeline Report"
+
+report_section_order:
+  barcoding_outcome:
+    order: -10
+  preprocessing_qc:
+    order: -20
+  gene_fetch:
+    order: -30
+  validation:
+    order: -40
+
+custom_content:
+  order:
+    - barcoding_outcome
+    - preprocessing_qc
+    - gene_fetch
+    - validation

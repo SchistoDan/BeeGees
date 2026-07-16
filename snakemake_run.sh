@@ -1,14 +1,16 @@
 #!/bin/bash
 ## Conda environment
-conda activate bgee_env
+source ~/apps/conda/etc/profile.d/conda.sh
+
+conda activate BeeGees_env
 
 # Setup logging
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-VERSION="v2.0.0"
-RUN_ID="BGEE Snakemake workflow"				
+VERSION="v3.0.0"
+RUN_ID="BeeGees Snakemake workflow"				
 LOG_FILE="snakemake_${TIMESTAMP}.log"
 CONFIG="./config/config.yaml"
-PROFILE="./profiles/slurm/"
+PROFILE="./profiles/local/"
 
 # Function for timestamped logging
 log_with_timestamp() {
@@ -30,8 +32,8 @@ log_with_timestamp "Conda environment: $CONDA_DEFAULT_ENV"
 log_with_timestamp "Unlocking Snakemake directory..."
 snakemake --profile "$PROFILE" \
     --snakefile ./workflow/Snakefile \
-	--configfile "$CONFIG" \
-	--unlock
+    --configfile "$CONFIG" \
+    --unlock
 
 # Run snakemake workflow with profile
 log_with_timestamp "Starting workflow execution..."
