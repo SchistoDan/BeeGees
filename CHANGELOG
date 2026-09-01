@@ -1,0 +1,39 @@
+# Changelog
+
+## v3.0.5 (2026-08-21)
+
+- Taxonomic validation: `tv_local_blast.py` now batches queries into chunks of 50
+  sequences per `blastn` invocation instead of running one process per sequence,
+  so a large reference database is loaded once per chunk rather than once per
+  barcode. Per-sequence TSV outputs, the summary CSV layout and resume behaviour
+  are unchanged. A failed chunk retries its sequences individually, and
+  sequences that still fail now cause a non-zero exit (with no summary CSV)
+  rather than being reported as no-match; `--allow-partial-failures` restores the
+  previous leniency.
+- Fixed the summary CSV dropping all hits for sequences whose FASTA header
+  carries a description, where BLAST's `qseqid` (first token only) did not match
+  the sanitized full header used as the CSV key.
+- Removed the unused `blast_options` entry from the Snakefile's
+  `taxonomic_validation` fallback, and corrected the documented BLAST hit limit
+  (100, not 500).
+- Structural validation: fixed a temp-file leak in `structural_validation.py`,
+  where the per-sequence nhmmer query and tabular files were created with
+  `delete=False` and never removed, leaving two files per sequence in `TMPDIR`
+  (48 per sample, since each sample is validated across 6 parameter
+  combinations and 4 input FASTAs).
+- Structural validation: added `--threads`, passed from the rule, setting
+  nhmmer's `--cpu` per invocation. Defaults to 1, so standalone behaviour is
+  unchanged.
+- Right-sized the rule resources to be flexible (to a degree) regardless of
+  sample sizes run. Resource allocations, considering retry memory scaling
+  should work with 1 or >500 samples.
+
+## v3.0.4 (2026-08-13)
+
+Initial PyPI release.
+
+- Full Snakemake workflow for barcode recovery
+- Barcode validation: structural (HMM-based) and taxonomic (local BLASTn)
+- `beegees run` CLI with `--profile local` and `--profile slurm` support
+- Bundled config and Snakemake profiles installable via `pip install beegees`
+- MultiQC report integration across all samples

@@ -1,0 +1,64 @@
+name: CI
+
+# Runs on the packaging branch and main, for both direct pushes and PRs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Cancel superseded runs on the same ref to save Actions minutes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Unit + dryrun tests. Installs the beegees package (the tests import it and
+  # resolve bundled scripts via importlib.resources), plus the `test` extra.
+  # No conda / MitoGeneExtractor / BLAST / HMMER needed -> runs in seconds.
+  # The Snakemake dryrun test self-skips here because MGE isn't on PATH.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install beegees + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run pytest
+        run: pytest tests/ -v
+
+  # ---------------------------------------------------------------------------
+  # Byte-compile every packaged workflow script. Catches syntax errors across
+  # all scripts, including those not covered by unit tests. multiqc_plots.R is
+  # excluded (it's R), as is the Snakefile (Snakemake DSL, not plain Python).
+  # ---------------------------------------------------------------------------
+  compile-check:
+    name: Compile all scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile workflow scripts
+        run: python -m py_compile beegees/workflow/scripts/*.py

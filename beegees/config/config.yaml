@@ -1,0 +1,177 @@
+# config/config.yaml
+
+# BeeGees run name identifier
+run_name: "RUN1"
+# Path to samples.csv
+samples_file: "/PATH/TO/SAMPLES.CSV"
+# Path to sequence_references.csv (leave path blank/empty if 'run_gene_fetch' == true)
+sequence_reference_file: ""
+# Path to output directory. Final dir will be created if it does not exist already.
+output_dir: "/PATH/TO/OUTPUT_DIR"
+
+
+## Fastp QC parameters
+# Adapters are selected automatically by run mode:
+#   - Paired-end: uses adapter_r1 / adapter_r2 below
+#     (leave both empty for the default Illumina TruSeq adapters; set both or neither).
+#   - SE (e.g. Ultima, forward only): fastp adapter auto-detection ("auto"), poly-G
+#     trimming disabled (flow-based chemistry, not two-colour), and 3' poly-X
+#     trimming applied (Ultima poly-T/poly-A homopolymer error rate).
+# extra_fastp_args accepts any additional fastp flags as a single quoted string.
+fastp:
+  adapter_r1: ""          # PE R1 (empty = Illumina default)
+  adapter_r2: ""          # PE R2 (empty = Illumina default)
+  extra_fastp_args: ""    # applied to both PE and SE
+
+
+## Gene Fetch parameters (https://github.com/bge-barcoding/gene_fetch), or using `gene-fetch --help`.
+run_gene_fetch: true  # Set true to use gene-fetch to generate reference sequences (default: true)
+gene_fetch:
+   email: "EXAMPLE@EXAMPLE.ac.uk"                # Email for NCBI API
+   api_key: "12345678910"                        # NCBI API key
+   gene: "coi"                                   # Target gene (e.g., cox1, rbcl, matk)
+   type: "both"                                  # Sequence type to fetch: "protein" or "both" (protein + nucleotide)
+   minimum_length: "500"                         # Minimum length of protein reference(s) to fetch (default: 500aa)
+   input_type: "hierarchical"                    # Does the 'samples.csv' contain a 'taxid' column or 'hierarchical' taxonomic information columns (default: taxid)? - see Gene Fetch docs for more detail
+   genbank: true                                 # Download GenBank records for retrieved pseudo-reference sequences
+
+
+## Downsampling parameters. Read downsampling occurs post-QC.
+downsampling:
+  enabled: false                                 # Set to true to enable downsampling (default: false)
+  max_reads: 0                                   # Maximum number of read to process. 10000000 gives 10M SE reads, or 10M pairs (20M individual reads for PE). Set to 0 to disable.
+
+
+## MitoGeneExtractor / barcode recovery parameters
+# Leave default (as below) for full parameter sweep. r1:s50 is the most relaxed, whilst r1.5:s100 is the most strict.
+barcode_recovery:
+  r:                                             # Exonerate relative score threshold parameter
+    - 1
+    - 1.3
+    - 1.5
+  s:                                             # Exonerate minimum score threshold parameter
+    - 50
+    - 100
+  n: 0                                           # Number of bp to extend beyond the Exonerate alignment
+  C: 5                                           # Genetic code table (used by both MitoGeneExtractor and structural validation)
+  t: 0.5                                         # Consensus threshold (0-1)
+
+
+## Post-processing of aligned reads for cleaning (using fasta_cleaner)
+# fasta_cleaner undertakes 6 steps - 1:Human cox1 similarity filtering, 2:AT-content filtering compared to consensus, 3:Statistical outlier filtering compared to consensus, 4:Custom reference-based filtering, 5:Consensus Generation, 6:Metrics aggregation. 
+# See README.md and docstring of each script (beegees/workflow/scripts) for more detailed parameter information
+fasta_cleaner:
+  consensus_threshold: 0.5                       # Threshold at which bases at each position must 'agree' to be incldued in the consensus (0-1)
+  human_threshold: 0.95                          # Threshold at which reads are removed due to similarity with human COI (0-1)
+  at_difference: 0.1                             # Threshold at which reads are removed due to AT content variation (0-1)
+  at_mode: "absolute"                            # At content filtering mode (Absolute/Higher/Lower)
+  outlier_percentile: 90.0                       # Threshold at which reads are flagged as statistical outliers to the consensus and removed (0-100)
+  reference_dir: null                            # Path to directory containing references for filtering (set to null/none if omitting step)
+  reference_filter_mode: "remove_similar"        # Filter mode: "keep_similar" (remove outliers) or "remove_similar" (remove sequences similar to reference)
+
+
+## Structural validation
+structural_validation:
+  target: "cox1"                                 # Options: cox1/coi or rbcl (maps to corresponding HMM)
+  verbose: false                                 # Enable verbose logging
+  # Genetic code is taken from barcode_recovery.C above (same value used by MitoGeneExtractor)
+
+
+## Taxonomic validation
+taxonomic_validation:
+    blast_db: "/path/to/BOLDistilled/"           # Path to BLASTn database directory or FASTA file
+    db_taxonomy: "/PATH/TO/BOLDistilled/BOLDistilled_taxonomy/source/BOLDistilled_COI_[version]_TAXONOMY.tsv"
+    taxval_rank: "family"                        # Taxonomic rank for validation (phylum, class, order, family, genus, species) (default & recommended: family)
+    expected_taxonomy: "/PATH/TO/EXPECTED_TAXONOMY"
+                                                 # It must contain the following columns: ID,phylum,class,order,family,genus,speces. ID must equal 'ID' from samples_file above
+    verbose: true                                # Enable verbose logging
+    min_pident: 80                               # Minimum percent identity (pident) threshold to be considered (0-100)
+    min_length: 100                              # Minimum length of BLASTn alignment to be considered (0-100)
+
+
+## NCBI taxonomy dump directory
+# Used by the download_taxdump rule and multiqc_plots.
+# Defaults to resources/ncbi_taxdump/ inside your working directory.
+# Override this when running BeeGees as a pip-installed package or when a
+# pre-downloaded dump should be reused across runs.
+# taxdump_dir: "/path/to/writable/ncbi_taxdump"
+
+
+## Resource allocation for each rule
+#
+# mem_mb is in MB (2048 = 2 GB) and is multiplied by the attempt number on retry.
+# A rule that dies at 4096 is resubmitted with 8192, etc. Therefore, size the base 
+# value for a typical run and let retries absorb any outliers.
+#
+# PER-SAMPLE rules run once per sample (MitoGeneExtractor runs once per sample per
+# r/s combination). Their cost is fixed no matter how many samples are run, so
+# size them for your deepest single sample - a 1-sample and a 500-sample run need
+# the same values.
+#
+# AGGREGATE rules run once for the whole run, so their memory grows with sample
+# count. The values below carry headroom to ~500 samples; the per-rule comments
+# highlight what drives each one.
+#
+# partition is only read for gene_fetch, MitoGeneExtractor, structural_validation
+# and taxonomic_validation. Every other rule takes the profile default (medium).
+# Do not delete those four keys: the Snakefile indexes them directly and will fail
+# with a KeyError.
+rules:
+  # ===== PER-SAMPLE: cost per job is independent of how many samples are in the run =====
+  gene_fetch:                                    # gene-fetch: reference retrieval from NCBI GenBank
+    mem_mb: 4096
+    partition: PLACEHOLDER                       # Runtime scales on sample number. 
+  fastp_qc:                                      # fastp: adapter trimming, QC, merging/deduplication (PE merge and concat modes)
+    mem_mb: 8192
+    threads: 4                                   # fastp --thread. Note gains flatten past ~8 even on deep samples
+  clean_headers_merge:                           # Clean fastq headers for MitoGeneExtractor compatibility (merge mode)
+    mem_mb: 4096
+  fastq_concat:                                  # Concatenation of fastp QC'd R1+R2 fastq files (concat mode)
+    mem_mb: 2048
+  quality_trim:                                  # Trim Galore: secondary quality trimming of concatenated reads (concat mode)
+    mem_mb: 8192
+    threads: 4                                   # trim_galore --cores. Note it spawns ~3-4x this many processes (cutadapt + pigz), so 4 occupies ~15 CPUs
+  downsample:                                    # reformat.sh: optional read downsampling (concat/merge/SE modes)
+    mem_mb: 8192
+  MitoGeneExtractor:                             # MitoGeneExtractor: protein-guided barcode extraction (concat/merge/SE modes)
+    mem_mb: 32768                                # Per sample per r/s combination; scales with read depth.
+    partition: PLACEHOLDER                       # Submit to high memory nodes (iv available) to allow memory scaling upon retry.
+  # ===== AGGREGATE: one job for the whole run, so memory grows with sample count =====
+  rename_and_combine_cons:                       # rename_headers.py: standardise and combine MGE consensus headers across parameter combinations
+    mem_mb: 4096
+    threads: 4                                   # rename_headers.py --threads. >4 is likely to have dimishing speed returns
+  gzip_merged_clean:                             # Gzip *_merged_clean.fastq files to reclaim disk space
+    mem_mb: 2048                                 # Flat memory requirement regardless of sample number
+  human_cox1_filter:                             # 01_human_cox1_filter.py: remove human COX1 contamination
+    mem_mb: 8192                                 # Process pool over per-sample alignments: peak is [threads] x [largest alignment], so it tracks read depth, NOT sample count
+    threads: 4
+  at_content_filter:                             # 02_at_content_filter.py: remove reads with aberrant AT content
+    mem_mb: 8192                                 # As above: [threads] x [largest alignment]
+    threads: 4
+  statistical_outlier_filter:                    # 03_statistical_outlier_filter.py: remove reads statistically dissimilar to the consensus
+    mem_mb: 8192                                 # As above: [threads] x [largest alignment], plus per-alignment numpy distance arrays - the heaviest of the three filters
+    threads: 4
+  reference_filter:                              # 04_reference_filter.py: optional reference-based sequence retention or contaminant removal
+    mem_mb: 4096
+    threads: 4
+  consensus_generation:                          # 05_consensus_generator.py: generate cleaned consensus sequences and aggregate metrics
+    mem_mb: 8192                                 # As above: [threads] x [largest alignment].
+    threads: 4
+  extract_stats_to_csv:                          # compile_barcoding_stats.py: extract per-sample MGE alignment statistics to CSV
+    mem_mb: 4096                                 # Builds one table across all samples, so grows with sample count
+  structural_validation:                         # structural_validation.py: HMM-based extraction, reading frame and stop-codon checks
+    mem_mb: 4096
+    threads: 4                                   # CPUs given to each nhmmer call (--cpu). Processing is sub-linear, so >4 threads has diminishing returns
+    partition: PLACEHOLDER
+  taxonomic_validation:                          # tv_local_blast.py: chunked BLASTn searches against local reference database
+    mem_mb: 8192                                 # ~250 MB per concurrent (50 consensus seq) chunk, plus the summary table over all barcodes
+    threads: 8                                   # Max concurrent single-threaded BLASTn chunks (50 sequences per chunk).
+    partition: PLACEHOLDER
+  blast2taxonomy:                                # tv_blast2taxonomy.py: hierarchical taxonomic matching and best-barcode selection
+    mem_mb: 4096
+  download_taxdump:                              # Download and extract the NCBI taxdump for blast2taxonomy
+    mem_mb: 2048
+  multiqc_plots:                                 # multiqc_plots.R: per-sample summary plots from pipeline metrics
+    mem_mb: 4096                                 # R data frames spanning all samples; grows with sample count
+  multiqc:                                       # MultiQC: aggregate all QC reports into a single interactive HTML report
+    mem_mb: 8192                                 # Parses every report in the run - the largest aggregate consumer at high sample counts

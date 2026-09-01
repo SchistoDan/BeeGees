@@ -1,0 +1,6 @@
+include beegees/workflow/Snakefile
+recursive-include beegees/workflow/scripts *
+recursive-include beegees/resources *
+recursive-include beegees/config *
+recursive-include beegees/profiles *
+global-exclude *.pyc *.pyo

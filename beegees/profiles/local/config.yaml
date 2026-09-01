@@ -1,0 +1,26 @@
+# Local execution profile for BeeGees pipeline
+# --- Parallelism ---
+cores: 16                    # Total CPU budget shared across all concurrent jobs. Each rule takes its own `threads:` from this pool.
+                             # Overridden by --cores on the command line.
+
+# local-cores: 1             # INERT here. Only applies when a cluster/cloud executor is active, where it caps cores for local rules 
+                             # running on the submit host. With no executor, `cores` governs everything. Left commented for reference
+
+# jobs: 10                   # INERT under Snakemake 8 without an executor: --jobs counts submitted cluster jobs, --cores counts local ones.
+                             # (Under Snakemake 7, -j aliased --cores and would conflict with the value above.)
+
+# --- Resource limits ---
+resources:
+  - mem_mb=92000             # Global memory ceiling for scheduling, in MB. Jobs are queued once their combined `mem_mb` would exceed this.
+                             # Deliberately below the srun --mem=100G (102400 MB) allocation: the Snakemake process, Python interpreters
+                             # and page cache all live in the same cgroup, so leaving ~10 GB headroom avoids sitting on the OOM boundary.
+
+# --- Execution settings ---
+latency-wait: 60             # Grace period for output files to appear on shared storage
+rerun-incomplete: true       # Re-run jobs whose outputs were left incomplete
+#printshellcmds: true        # Echo the shell command for each job
+
+# --- Retries ---
+restart-times: 3             # Retry a failed job up to 3 times. Note: retries re-request
+                             # the same memory, so an OOM kill will simply fail 3x unless the rule scales mem_mb on `attempt` — e.g.
+                             # resources: mem_mb=lambda wc, attempt: 8000 * attempt

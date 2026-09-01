@@ -1,0 +1,31 @@
+# profiles/slurm/config.yaml
+
+executor: slurm
+
+# --- Default resources applied to every job unless the rule overrides them ---
+default-resources:
+  - slurm_partition=medium            # Target partition. Should have a wall-clock limit at least as long as `runtime` below.
+  - slurm_extra="--no-requeue"        # Arbitrary extra sbatch flags. --no-requeue stops SLURM silently re-running a job after 
+                                      # node failure or preemption, which would otherwise duplicate work and confuse Snakemake's 
+                                      # own retry accounting. Do NOT put --ntasks/--cpus-per-task/--mem/-t here; the executor 
+                                      # plugin sets those from resources and will complain about (or be overridden by) duplicates.
+  - runtime=720                       # Default wall-clock limit in MINUTES (720 = 12 h), passed to sbatch as -t. 
+                                      # Override per-rule in the rules: block of config.yaml.
+  # - slurm_account="<your_account>"  # Uncomment if the cluster requires an explicit account (-A). Find yours with: sacctmgr show user $USER
+
+# --- Job submission ---
+jobs: 10                              # Maximum jobs in flight (submitted or running) at once. This is a fair-share/queue-etiquette limit rather 
+                                      # than a local resource one — the jobs themselves run on compute nodes. Raise for large batches if the queue allows.
+local-cores: 1                        # CPU budget on the submit node for local rules — those in`localrules:` plus trivia like `all`. Unlike in the local
+                                      # profile, this key IS active here, because an executor is in use. Keep at 1 so nothing heavy runs on the login node.
+
+# --- Filesystem and status polling ---
+latency-wait: 120                     # Grace period for output files to appear after a job reports success. Generous, as networked storage lags.
+seconds-between-status-checks: 60     # Nominal interval between squeue/sacct polls.
+max-status-checks-per-second: 0.0167  # Hard throttle on polling rate. NOTE: 0.01/s is one check per 100s. Set to 0.0167 if you want the 60 s to take effect.
+
+# --- Retries ---
+restart-times: 3                      # Retry a failed job up to 3 times. As in the local profile, retries re-request identical resources, so an OOM or
+                                      # timeout will just fail 3x unless the rule scales on `attempt` — e.g. resources:
+                                      #             mem_mb=lambda wc, attempt: 8000 * attempt,
+                                      #             runtime=lambda wc, attempt: 720 * attempt

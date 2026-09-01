@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beegees"
+version = "3.0.5"
+description = "BeeGees: DNA barcoding from museum specimen genome skims via Snakemake"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [
+    {name = "Dan A.J. Parsons", email = "d.parsons@nhm.ac.uk"},
+    {name = "Rutger A. Vos", email = "rutger.vos@naturalis.nl"},
+    {name = "Ben W. Price", email = "b.price@nhm.ac.uk"},
+]
+
+keywords = ["bioinformatics", "dna-barcoding", "snakemake", "genomics", "museum-specimens"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# Dependencies needed to run the test suite. These are the libraries the
+# workflow scripts import at module load (Bio, numpy, pandas) plus pyyaml for
+# the config tests and pytest itself. Versions mirror beegees_env.yaml so CI
+# exercises the same library versions as a production conda run. At runtime the
+# pipeline gets these from the bioconda environment, which is why the package's
+# own `dependencies` stays empty.
+test = [
+    "pytest>=7",
+    "pyyaml",
+    "biopython==1.84",
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+]
+
+[project.scripts]
+beegees = "beegees.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/bge-barcoding/BeeGees"
+Repository = "https://github.com/bge-barcoding/BeeGees"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["beegees*"]
+exclude = ["*__pycache__*"]
+
+[tool.setuptools.package-data]
+beegees = [
+    "workflow/Snakefile",
+    "workflow/scripts/*",
+    "resources/**/*",
+    "config/*",
+    "profiles/**/*",
+    "profiles/slurm/bin/*",
+]
