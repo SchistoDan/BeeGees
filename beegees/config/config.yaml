@@ -58,11 +58,11 @@ barcode_recovery:
 
 
 ## Post-processing of aligned reads for cleaning (using fasta_cleaner)
-# fasta_cleaner undertakes 6 steps - 1:Human cox1 similarity filtering, 2:AT-content filtering compared to consensus, 3:Statistical outlier filtering compared to consensus, 4:Custom reference-based filtering, 5:Consensus Generation, 6:Metrics aggregation. 
+# fasta_cleaner undertakes 6 steps - 1:Human contamination removal by read mapping, 2:AT-content filtering compared to consensus, 3:Statistical outlier filtering compared to consensus, 4:Custom reference-based filtering, 5:Consensus Generation, 6:Metrics aggregation. 
 # See README.md and docstring of each script (beegees/workflow/scripts) for more detailed parameter information
 fasta_cleaner:
   consensus_threshold: 0.5                       # Threshold at which bases at each position must 'agree' to be incldued in the consensus (0-1)
-  human_threshold: 0.95                          # Threshold at which reads are removed due to similarity with human COI (0-1)
+  human_reference: null                          # FASTA of human sequence that reads are mapped against for contamination removal. null = packaged human mitogenome (NC_012920.1)
   at_difference: 0.1                             # Threshold at which reads are removed due to AT content variation (0-1)
   at_mode: "absolute"                            # At content filtering mode (Absolute/Higher/Lower)
   outlier_percentile: 90.0                       # Threshold at which reads are flagged as statistical outliers to the consensus and removed (0-100)
@@ -81,7 +81,9 @@ structural_validation:
 taxonomic_validation:
     blast_db: "/path/to/BOLDistilled/"           # Path to BLASTn database directory or FASTA file
     db_taxonomy: "/PATH/TO/BOLDistilled/BOLDistilled_taxonomy/source/BOLDistilled_COI_[version]_TAXONOMY.tsv"
-    taxval_rank: "family"                        # Taxonomic rank for validation (phylum, class, order, family, genus, species) (default & recommended: family)
+    taxval_rank: "family"                        # Coarsest rank a BLASTn hit may match at to count as validated (order, family, genus, species) (default & recommended: family).
+                                                 # A hit matching only above this rank is NOT a match: at "family", a hit sharing only the expected order is rejected.
+                                                 # Relaxed per sample to the coarsest rank present in that sample's expected_taxonomy if this rank has no value there.
     expected_taxonomy: "/PATH/TO/EXPECTED_TAXONOMY"
                                                  # It must contain the following columns: ID,phylum,class,order,family,genus,speces. ID must equal 'ID' from samples_file above
     verbose: true                                # Enable verbose logging
@@ -90,23 +92,31 @@ taxonomic_validation:
 
 
 ## NCBI taxonomy dump directory
-# Used by the download_taxdump rule and multiqc_plots.
-# Defaults to resources/ncbi_taxdump/ inside your working directory.
+# Defaults to resources/ncbi_taxdump/ inside your BeeGees (working) directory.
 # Override this when running BeeGees as a pip-installed package or when a
 # pre-downloaded dump should be reused across runs.
 # taxdump_dir: "/path/to/writable/ncbi_taxdump"
 
 
-## Resource allocation for each rule
+# The BWA index is built once per run by the bwa_index_human_ref rule and written
+# to resources/bwa_index/ in your BeeGees (working) directory. It is deleted at the end of the
+# run because a small reference re-indexes in about a second. Set the following
+# to true when using a genome-scale reference, where `bwa index` takes an hour or
+# more per gigabase and should be kept between runs.
+# keep_bwa_index: false
 #
-# mem_mb is in MB (2048 = 2 GB) and is multiplied by the attempt number on retry.
+# Override where the index is written:
+# bwa_index_dir: "/path/to/writable/bwa_index"
+
+
+## Resource allocation for each rule
+# mem_mb is in MB (1024 = 1 GB) and is multiplied by the attempt number on retry.
 # A rule that dies at 4096 is resubmitted with 8192, etc. Therefore, size the base 
 # value for a typical run and let retries absorb any outliers.
 #
-# PER-SAMPLE rules run once per sample (MitoGeneExtractor runs once per sample per
-# r/s combination). Their cost is fixed no matter how many samples are run, so
-# size them for your deepest single sample - a 1-sample and a 500-sample run need
-# the same values.
+# PER-SAMPLE rules (generally) run once per sample. 
+# Their cost is fixed no matter how many samples are run, so size them for your deepest 
+# single sample - a 1-sample and a 500-sample run need the same values.
 #
 # AGGREGATE rules run once for the whole run, so their memory grows with sample
 # count. The values below carry headroom to ~500 samples; the per-rule comments
@@ -130,7 +140,7 @@ rules:
     mem_mb: 2048
   quality_trim:                                  # Trim Galore: secondary quality trimming of concatenated reads (concat mode)
     mem_mb: 8192
-    threads: 4                                   # trim_galore --cores. Note it spawns ~3-4x this many processes (cutadapt + pigz), so 4 occupies ~15 CPUs
+    threads: 4                                   # trim_galore --cores. v0.6.x spawns ~3-4x this many processes (cutadapt + pigz), so 4 occupies ~15 CPUs. v2.x is a single binary using cores+4
   downsample:                                    # reformat.sh: optional read downsampling (concat/merge/SE modes)
     mem_mb: 8192
   MitoGeneExtractor:                             # MitoGeneExtractor: protein-guided barcode extraction (concat/merge/SE modes)
@@ -142,9 +152,9 @@ rules:
     threads: 4                                   # rename_headers.py --threads. >4 is likely to have dimishing speed returns
   gzip_merged_clean:                             # Gzip *_merged_clean.fastq files to reclaim disk space
     mem_mb: 2048                                 # Flat memory requirement regardless of sample number
-  human_cox1_filter:                             # 01_human_cox1_filter.py: remove human COX1 contamination
-    mem_mb: 8192                                 # Process pool over per-sample alignments: peak is [threads] x [largest alignment], so it tracks read depth, NOT sample count
-    threads: 4
+  human_mitogenome_filter:                       # 01_human_mitogenome_filter.py: remove human contamination by mapping reads to a human reference
+    mem_mb: 8192                                 # Process pool over per-sample alignments: peak is [threads] x [largest alignment] plus the BWA index, so it tracks read depth and reference size, NOT sample count
+    threads: 4                                   # Alignment files processed in parallel (one bwa thread each)
   at_content_filter:                             # 02_at_content_filter.py: remove reads with aberrant AT content
     mem_mb: 8192                                 # As above: [threads] x [largest alignment]
     threads: 4

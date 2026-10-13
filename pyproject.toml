@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beegees"
-version = "3.0.5"
+version = "3.0.7"
 description = "BeeGees: DNA barcoding from museum specimen genome skims via Snakemake"
 readme = "README.md"
 license = "MIT"
@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
 ]
-dependencies = []
+dependencies = ["pyyaml"]  # Imported by the beegees CLI (config/sample parsing)
 
 [project.optional-dependencies]
 # Dependencies needed to run the test suite. These are the libraries the

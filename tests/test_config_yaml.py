@@ -78,9 +78,16 @@ class TestConfigYamlStructure:
         val = config["fasta_cleaner"]["consensus_threshold"]
         assert 0.0 <= float(val) <= 1.0
 
-    def test_fasta_cleaner_human_threshold_in_range(self, config):
-        val = config["fasta_cleaner"]["human_threshold"]
-        assert 0.0 <= float(val) <= 1.0
+    def test_fasta_cleaner_human_reference_present(self, config):
+        # null means "use the packaged human mitogenome"; a string is a path to a
+        # user-supplied FASTA (e.g. mitogenome + NUMTs).
+        assert "human_reference" in config["fasta_cleaner"]
+        val = config["fasta_cleaner"]["human_reference"]
+        assert val is None or isinstance(val, str)
+
+    def test_fasta_cleaner_human_threshold_removed(self, config):
+        # Replaced by mapping-based filtering, which has no similarity threshold.
+        assert "human_threshold" not in config["fasta_cleaner"]
 
     def test_fasta_cleaner_at_difference_in_range(self, config):
         val = config["fasta_cleaner"]["at_difference"]
@@ -105,7 +112,9 @@ class TestConfigYamlStructure:
     # taxonomic_validation section
     def test_taxonomic_validation_taxval_rank_valid(self, config):
         rank = config.get("taxonomic_validation", {}).get("taxval_rank", "")
-        valid_ranks = {"phylum", "class", "order", "family", "genus", "species"}
+        # Only these four are accepted: matching is restricted to them, and tv_blast2taxonomy.py's
+        # argparse choices reject anything else
+        valid_ranks = {"order", "family", "genus", "species"}
         assert rank.lower() in valid_ranks
 
     # rules section

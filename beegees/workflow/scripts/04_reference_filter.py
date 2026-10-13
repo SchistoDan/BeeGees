@@ -114,7 +114,7 @@ def run_command(cmd: List[str], check: bool = True, capture_output: bool = False
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nError: {e}")
     except FileNotFoundError:
-        raise RuntimeError(f"Command not found: {cmd[0]}. Please ensure BWA and samtools are installed.")
+        raise RuntimeError(f"Command not found: {cmd[0]}. Please ensure it is installed and on PATH.")
 
 def create_bwa_index_safely(reference_file: str) -> bool:
     # Check if index already exists
@@ -476,14 +476,22 @@ def main():
         print(f"Error: Reference directory does not exist: {args.reference_dir}")
         sys.exit(1)
     
-    # Check BWA and samtools availability
+    # BWA is required: it performs the read-to-reference mapping.
     try:
         run_command(['bwa'], check=False)
-        run_command(['samtools', '--version'], check=False)
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)
-    
+
+    # samtools is optional: it supplies only the flagstat summary reported
+    # alongside the filtered output. Filtering itself parses SAM flags in pure
+    # Python (see parse_sam_file), so a missing samtools degrades the reported
+    # statistics rather than failing the run.
+    try:
+        run_command(['samtools', '--version'], check=False)
+    except RuntimeError:
+        print("Warning: samtools not found - mapping statistics will be reported as zero.")
+   
     # Read input files
     with open(args.input_files_list, 'r') as f:
         input_files = [line.strip() for line in f if line.strip()]

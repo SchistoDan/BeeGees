@@ -1,7 +1,77 @@
 # Changelog
 
-## v3.0.5 (2026-08-21)
+## v3.0.7 (2026-10-06)
+- `structural_validation.py` now builds the barcode from every significant, 
+  non-overlapping nhmmer envelope instead of only the lowest-E-value 
+  (i.e. best) one. nhmmer reports one envelope per contiguous stretch matching 
+  the profile, so a consensus with a low-coverage hole in the middle comes back 
+  as two envelopes. `parse_nhmmer_result()` kept one and dropped the rest with 
+  no log line at all, truncating the barcode to whichever fragment happened to 
+  score best. Envelopes are now accepted 'greedily' in E-value order, and only 
+  where they overlap nothing already accepted in HMM and sequence coordinates.
+  The span between envelopes is filled with N.
+- An extra envelope is merged only when it spans more model positions than the
+  gap it would open (i.e. is a "net gain"). The gap has no data and is filled 
+  with N's, so a small, distant envelope adds more ambiguity than sequence. 
+  Envelopes inside the accepted span cost nothing, since they convert
+  existing N into bases, and are always merged. The best-E-value envelope 
+  remains the anchor, so no barcode can come out shorter than before the 
+  envelope net-gain fix.
+- Replaced `01_human_cox1_filter.py` with `01_human_mitogenome_filter.py`, to
+  remove human contamination by mapping reads to a human mitogenome reference 
+  and NUMTs with `bwa aln` instead of comparing them positionally against a 
+  hardcoded COX1 sequence.
+- Added `fasta_cleaner.human_reference` to set the mapping reference. `null` uses
+  the packaged human reference.
+- `fasta_cleaner.human_threshold` is removed - mapping has no similarity
+  threshold.
+- Added the `bwa_index_human_ref` rule, which indexes the human reference once per
+  run and is shared by the merge, concat and se filter rules. The index is
+  written to `resources/bwa_index/` in the working directory via `bwa index -p`. 
+  It is removed at the end of the run; set `keep_bwa_index: true` when using a
+  genome-scale/alternative reference.
+- Renamed the `human_cox1_filter` rules and the `rules.human_cox1_filter` resource
+  key to `human_mitogenome_filter`. Output paths, file names and metric names are
+  unchanged.
+- MultiQC report header no longer shows the absolute path of the analysed
+  directory (`show_analysis_paths: false` in `multiqc_config.yaml`), so server
+  directory layouts (e.g. Galaxy job directories) are not exposed to end users.
+- The `file` column of `structural_validation.csv` now holds paths relative to
+  the output directory (e.g. `03_barcode_recovery/concat_mode/consensus/...`)
+  instead of absolute paths.
+- Renamed the `val_barcode_recovery_metrics_merge` rule to
+  `val_barcode_recovery_metrics_combine` to be more descriptive (not only a 
+  product of the 'merge' pre-processing mode).
+- `gene_fetch.type` is now checked at startup with the other required
+  `gene_fetch` keys, so a missing value fails immediately with a clear message
+  instead of a KeyError when the rule is built.
+- Declared `pyyaml` as a package dependency. The `beegees` CLI imports it to
+  read the config, but `dependencies` was empty, so `pip install beegees` gave a
+  CLI that failed at startup with `ModuleNotFoundError: No module named 'yaml'`.
+  Conda installs were unaffected, since Snakemake pulls in pyyaml.
+- Added `.github/workflows/publish.yml`: publishing a GitHub Release runs the CI
+  tests, builds and checks the sdist and wheel, smoke-tests the installed wheel,
+  and uploads to PyPI via Trusted Publishing.
 
+## v3.0.6 (2026-09-02)
+- The bioconda recipe was missing `bbmap` (`reformat.sh`, used by the
+  optional downsampling rules), `samtools`, `wget` (`download_taxdump`) and
+  `r-yaml` (`library(yaml)` in `multiqc_plots.R`, previously satisfied only as a
+  transitive tidyverse dependency). Enabling `downsampling.enabled` or setting
+  `fasta_cleaner.reference_dir` on a conda install failed with a missing binary.
+- Removed the undeclared `bc` dependency from the MitoGeneExtractor rules, which
+  used it only to format a file size for the log. Replaced with `numfmt`, already
+  used throughout the Snakefile. `bc` was on the default execution path and
+  present in no environment file.
+- `04_reference_filter.py` no longer exits when `samtools` is absent. samtools
+  supplies only the `flagstat` summary; filtering itself parses SAM flags in pure
+  Python. A missing samtools now warns and reports zeroed statistics.
+- Removed `beegees_env.yaml` and rewrote the installation docs around
+  `conda install -c conda-forge -c bioconda beegees`.
+- `run_local.sh` and `run_slurm.sh` now pass `--config config/config.yaml`,
+  matching the layout `beegees init` creates rather than a clone-relative path.
+
+## v3.0.5 (2026-08-21)
 - Taxonomic validation: `tv_local_blast.py` now batches queries into chunks of 50
   sequences per `blastn` invocation instead of running one process per sequence,
   so a large reference database is loaded once per chunk rather than once per
@@ -29,7 +99,6 @@
   should work with 1 or >500 samples.
 
 ## v3.0.4 (2026-08-13)
-
 Initial PyPI release.
 
 - Full Snakemake workflow for barcode recovery

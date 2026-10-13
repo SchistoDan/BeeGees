@@ -86,7 +86,7 @@ def minimal_run(tmp_path):
 
         fasta_cleaner:
           consensus_threshold: 0.5
-          human_threshold: 0.95
+          human_reference: null
           at_difference: 0.1
           at_mode: "absolute"
           outlier_percentile: 90.0
@@ -136,7 +136,7 @@ def minimal_run(tmp_path):
           gzip_merged_clean:
             mem_mb: 4096
             threads: 1
-          human_cox1_filter:
+          human_mitogenome_filter:
             mem_mb: 4096
             threads: 1
           at_content_filter:

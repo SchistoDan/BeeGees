@@ -19,7 +19,7 @@ BeeGees is a Snakemake workflow for recovering high-quality protein-coding DNA b
 
 # Contents #
 - [Requirements](#requirements)
-- [Installation](#Installation)
+- [Installation](#installation)
 - [Quick start](#quick-start)
 - [Workflow](#workflow)
 - [Preparing inputs](#preparing-inputs)
@@ -50,28 +50,42 @@ BeeGees is a Snakemake workflow for recovering high-quality protein-coding DNA b
 - **Reads** in `.fastq`/`.fastq.gz` format - either paired-end or single-end from Ultima Genomics sequencing.
 - **`samples.csv`**
 - **`sequence_references.csv`**
-- **Activated conda environment** (see `beegees_env.yaml`).
-> **Note for pip users:** all 'scientific tool' dependencies (Snakemake, MitoGeneExtractor, fastp, TrimGalore, BLAST, nhmmer, etc.) come from the BeeGees conda environment. `pip install beegees` provides the CLI only - the pipeline will not run without the BeeGees conda environment active.
+- **BeeGees installed via conda** (see [Installation](#installation)), with its environment activated.
+> **Note for pip users:** all 'scientific tool' dependencies (Snakemake, MitoGeneExtractor, fastp, TrimGalore, BLAST, nhmmer, etc.) come from conda. `pip install beegees` provides the CLI only - the pipeline will not run unless those tools are present on `PATH`.
 
 
 ---
 
 
-# Installation # 
-The `beegees` pipeline can currently be downloaded via by:
-1. Cloning the beegees respository
+# Installation #
+```bash
+conda install -c conda-forge -c bioconda beegees
 ```
-gh repo clone bge-barcoding/BeeGees
-# Or
-wget https://github.com/bge-barcoding/BeeGees/archive/refs/heads/main.zip
-```
-3. As a pip through PyPi
-```
+> This installs the `beegees` CLI together with every tool the workflow invokes (Snakemake, MitoGeneExtractor, fastp, TrimGalore, BLAST, nhmmer, bwa, samtools, BBTools, MultiQC and R). Nothing else needs installing.
+
+<details>
+<summary><b>Alternative: pip</b></summary>
+
+```bash
 pip install beegees
 ```
-> **Pip users:** after installation, run `beegees init` in your working directory to copy the template `config/`, `profiles/`, and `samples_template.csv` into the current directory. These files are required before running the pipeline (see section below).
 
-> `beegees` will be available as a conda package through bioconda in the near future.
+`pip install beegees` provides the CLI **only** — every scientific tool listed above must already be on `PATH`. Prefer the conda install unless you are managing those dependencies yourself.
+</details>
+
+<details>
+<summary><b>Alternative: from source (contributors)</b></summary>
+
+```bash
+git clone https://github.com/bge-barcoding/BeeGees.git
+cd BeeGees
+conda create -n beegees-dev -c conda-forge -c bioconda beegees --only-deps
+conda activate beegees-dev
+pip install -e .
+```
+
+`--only-deps` installs the tools without the packaged `beegees`; `pip install -e .` then points the CLI at your checkout, so edits under `beegees/workflow/` take effect immediately. Without the editable install the CLI runs the *installed* Snakefile rather than your checkout.
+</details>
 
 
 --- 
@@ -79,18 +93,15 @@ pip install beegees
 
 # Quick start #
 
-> **Installation note:** `pip install beegees` provides the `beegees` CLI only — all scientific tool dependencies (Snakemake, MitoGeneExtractor, fastp, TrimGalore, BLAST, nhmmer, etc.) must come from the conda environment. A bioconda package that bundles all dependencies is planned; until then, the clone workflow below is recommended for all users.
-
-### 1. Clone the repository and create the conda environment
+### 1. Create a working directory and initialise templates
 ```bash
-git clone https://github.com/bge-barcoding/BeeGees.git
-cd BeeGees
-conda env create -f beegees_env.yaml
-conda activate beegees_env
+mkdir my-run && cd my-run
+beegees init
 ```
+This copies the template `config/`, `profiles/` and `samples_template.csv` into the current directory. Every subsequent step runs from here.
 
 ### 2. Complete samples.csv
-Create `samples.csv` or edit `beegees/config/samples_template.csv`, with sample identifier (ID), forward (SE data only) and reverse read paths (PE data), and hierarchical taxonomy or NCBI taxonomic identifiers (taxid) — [see section below for details](#samplescsv).
+Create `samples.csv` or edit the `samples_template.csv` written by `beegees init`, with sample identifier (ID), forward (SE data only) and reverse read paths (PE data), and hierarchical taxonomy or NCBI taxonomic identifiers (taxid) — [see section below for details](#samplescsv).
 
 ### 3. Download a BLASTn database and taxonomy mappings file
 Required for taxonomic validation of generated barcode consensus sequences — [see section below for details on available databases](#validation-process) or [guidance on creating your own BLASTn database and mapping file](https://github.com/bge-barcoding/BeeGees/blob/main/docs/README_custom_blast_dbs.md).
@@ -100,9 +111,9 @@ Fill in paths to required files, set parameters, credentials, and resource alloc
 
 ### 5. Run BeeGees using the `beegees run` command with the appropriate profile:
 
-**SLURM** (recommended for SLURM-based HPC clusters): run directly on the login node — Snakemake farms each rule out as a separate SLURM job:
+**SLURM** (recommended for SLURM-based HPC clusters): Snakemake farms each rule out as a separate SLURM job, so this is submitted from the login node. Wrap the command in a small sbatch script (see [`run_slurm.sh`](https://github.com/bge-barcoding/BeeGees/blob/main/run_slurm.sh) in the repository for a template):
 ```bash
-sbatch run_slurm.sh
+beegees run --config config/config.yaml --profile slurm --log-file beegees.log
 ```
 
 **Local** (all rules run on the current node — suitable for interactive compute sessions):
@@ -111,11 +122,11 @@ sbatch run_slurm.sh
 srun --pty --mem=128G --cpus-per-task=16 --time=08:00:00 bash
 
 # Run BeeGees locally
-bash run_local.sh
+beegees run --config config/config.yaml --profile local --log-file beegees.log
 ```
 
 > Use `beegees run --help` for additional options (e.g. `--cores`, `--dryrun`, `--log-file PATH` to write a live log file).
-> Depending on your HPC cluster architecture and job scheduler, you may need to edit the partition in `run_*.sh`, `config.yaml` rule resource block, and `slurm_partition` in `profiles/slurm/config.yaml`.
+> Depending on your HPC cluster architecture and job scheduler, you may need to edit the partition in your sbatch script, the `config.yaml` rule resource block, and `slurm_partition` in `profiles/slurm/config.yaml`. The pipe is currently set up for a SLURM HPC.
 
 
 # Workflow #
@@ -130,7 +141,7 @@ bash run_local.sh
 3. **Barcode recovery** - protein reference-guided extraction of barcode sequences from preprocessed reads using MitoGeneExtractor, producing initial consensus sequences.
 4. **Consensus preparation** - header standardisation and concatenation of raw consensus sequences into multi-FASTA.
 5. **Consensus cleaning and filtering (`fasta_cleaner`)** - sequential filters applied to MGE read alignments to remove contaminants and outliers before generating cleaned consensus sequences:
-   - Human COI contamination removal, common in museum specimens ([`01_human_cox1_filter.py`](https://github.com/bge-barcoding/BeeGees/blob/main/workflow/scripts/01_human_cox1_filter.py))
+   - Human contamination removal, common in museum specimens, by mapping reads to a human reference with `bwa aln` ([`01_human_mitogenome_filter.py`](https://github.com/bge-barcoding/BeeGees/blob/main/workflow/scripts/01_human_mitogenome_filter.py)). The packaged reference is the human mitogenome plus human NUMTs
    - AT content filtering, targeting suspected fungal/bacterial contamination ([`02_at_content_filter.py`](https://github.com/bge-barcoding/BeeGees/blob/main/workflow/scripts/02_at_content_filter.py))
    - Statistical outlier removal of reads dissimilar to the initial consensus ([`03_statistical_outlier_filter.py`](https://github.com/bge-barcoding/BeeGees/blob/main/workflow/scripts/03_statistical_outlier_filter.py))
    - Optional custom reference-based filtering ([`04_reference_filter.py`](https://github.com/bge-barcoding/BeeGees/blob/main/workflow/scripts/04_reference_filter.py))
@@ -221,7 +232,7 @@ The file must contain the headers **`ID`** and **`protein_reference_path`**:
 # Configuration #
  
 ## config.yaml ##
-- Update `beegees/config/config.yaml` (generated by `beegees init` into the current directory for pip users) with the required paths, variables, and credentials.
+- Update `config/config.yaml` (written into the current directory by `beegees init`) with the required paths, variables, and credentials.
 - 
 **General**
 ```
@@ -269,10 +280,10 @@ C: Genetic code for Exonerate (https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprin
 t: Consensus threshold (e.g. 0.5 = 50%) (default: 0.5)
 ```
 
-**fasta_cleaner** - applied in order: (01) human COI → (02) AT content → (03) statistical outlier → (04, optional) reference-based → (05) cleaned consensus generation → (06) metrics aggregation
+**fasta_cleaner** - applied in order: (01) human contamination → (02) AT content → (03) statistical outlier → (04, optional) reference-based → (05) cleaned consensus generation → (06) metrics aggregation
 ```
 consensus_threshold: Proportion of bases at each position that must agree to be included in the consensus (e.g. 0.5 = ≥50%)
-human_threshold: Similarity to the human COI reference above which reads are removed (e.g. 0.95)
+human_reference: FASTA of human sequence that reads are mapped against for contamination removal. null uses the packaged human reference (the human mitogenome NC_012920.1 plus human NUMTs from MANUDB), which removes both mitochondrial and NUMT-derived (nuclear mitochondrial insertion) contamination
 at_difference: AT content deviation from the consensus above which reads are removed (e.g. 0.1 = 10%)
 at_mode: Absolute (remove if AT content differs by more than the threshold in either direction), Higher (remove only above threshold), or Lower (remove only below threshold)
 outlier_percentile: Similarity to the consensus below which reads are flagged as statistical outliers and removed (e.g. 90.0)
@@ -290,10 +301,14 @@ verbose: Enable verbose logging (default: false)
 ```
 database: Path to a BLASTn database directory, or to a FASTA file to build one from (using makeblastdb)
 database_taxonomy: TSV of taxonomic mappings corresponding to records in the BLASTn database
-taxval_rank: Highest taxonomic rank to validate at (default and recommended: family)
+taxval_rank: Coarsest rank a BLASTn hit may match at to count as validated; matches above it are
+             rejected (default and recommended: family). Relaxed per sample to the coarsest rank
+             present in that sample's expected_taxonomy if this rank has no value there
 expected_taxonomy: CSV with columns Process ID,phylum,class,order,family,genus,species, where
                    Process ID equals ID in samples_file. If hierarchical taxonomy was supplied in
-                   samples.csv, that file can be reused here
+                   samples.csv, that file can be reused here. Names are compared to the database
+                   taxonomy ignoring case and internal whitespace, so "sciuridae", "Sciuridae"
+                   and "SCIURIDAE" are equivalent
 min_pident: Minimum percent identity for a BLAST hit to be retained
 min_length: Minimum alignment length for a BLAST hit to be retained
 verbose: Enable verbose logging (default: true)
@@ -479,6 +494,8 @@ Reference data required per marker:
 
 >  Information on how the supported barcode HMMs were constructed can be found in [`docs/README_hmm_info.md`](https://github.com/bge-barcoding/BeeGees/blob/main/docs/README_hmm_info.md).
 
+> Information on how the packaged human contamination reference was built can be found in [`docs/README_human_reference.md`](https://github.com/bge-barcoding/BeeGees/blob/main/docs/README_human_reference.md). 
+
 ## Structural validation ##
 Structural validation (via `structural_validation.py`) assesses every barcode consensus sequence to identify high-quality, protein-coding those suitable for taxonomic assignment. It outputs a CSV of structural, translation and quality-rank metrics for all sequences, plus `output_barcode_all_passing.fasta` containing every sequence that passes all five criteria below (a single process ID may have multiple passing sequences).
 
@@ -508,9 +525,9 @@ Taxonomic validation runs in two steps, via `tv_local_blast.py` and `tv_blast2ta
  
 **2. Taxonomic assignment validation.** BLASTn results are checked against expected taxonomy using hierarchical matching and quality-based filtering:
 1. Parse the local BLASTn summary CSV, per-sample expected lineages, database taxonomy mappings, and structurally validated sequences.
-2. Discard hits below `min_pident` or below `min_length` (set in `beegees/config/config.yaml`).
-3. Compare remaining hits against the expected lineage by exact string matching at family, genus or species level (highest rank considered is set by `taxval_rank`). The first (top) hit matching at any allowed rank is accepted.
-4. Select the best sequence per process ID from those with taxonomy matches, prioritising in order: lowest matched rank (species > genus > family), then fewest gaps, fewest mismatches, highest percent identity, lowest e-value, highest alignment length, highest MGE `s` value, highest MGE `r` value, and finally sequences containing `fcleaner` in the seq ID (preferring cleaned consensus sequences).
+2. Discard hits below `min_pident` or below `min_length` (set in `config/config.yaml`).
+3. Compare remaining hits against the expected lineage by exact string matching at species, genus, family or order level. `taxval_rank` sets the **validation floor** — the coarsest rank a match may be accepted at — and matches above it are rejected, so at the default of `family` a hit sharing only the expected order is not a match. The floor is resolved per sample: if the configured rank has no value in that sample's expected taxonomy, the coarsest rank that does becomes the floor (reported in the `expected_taxonomy_rank` column), so a sample with no expected family is still validated at order. The first hit matching at or below the floor is accepted — hits are supplied percent-identity descending, so this is the highest-identity matching hit, not necessarily the one matching most specifically.
+4. Select the best sequence per process ID from those with taxonomy matches, prioritising in order: lowest matched rank (species > genus > family), then fewest gaps, fewest mismatches, highest percent identity, lowest e-value, highest alignment length, highest MGE `s` value, highest MGE `r` value, and finally sequences containing `fcleaner` in the seq ID (preferring cleaned consensus sequences). A process ID whose sequences all fail validation has no selected sequence and contributes nothing to the output FASTA.
 5. Write the taxonomic validation CSV.
 
 ---
@@ -591,5 +608,4 @@ Issues, forks and pull requests are welcome. This pipeline was produced by Dan P
  
 # Future developments #
 - Expand supported markers beyond COI-5P and rbcL. Will require marker-specific HMMs, BLAST databases and associated taxonomy files for barcode validation. Next likely marker to be added = MatK.
-- Update 01_human_cox1_filter.py so it does not solely filter aligned reads against human COI, but instead against the whole human mitogenome.
 - Replacement of final BLASTn taxonomic validation and parsing, using the [BOLDistilled](https://www.boldsystems.org/data/boldistilled/) COI database, with a SINTAX approach instead. SINTAX should be faster, does taxonomic traversal, and provides a confidence score for each match.

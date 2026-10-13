@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """
-Human Mitogenome Mapping Filter - Memory Efficient Version
-Removes sequences that map to human mitochondrial or nuclear genome using minimap2, bwa-mem, or bwa-aln
+Human Mapping Filter
 
-Key improvements:
+Removes sequences that map to the human mitochondrial/nuclear genome using
+minimap2, bwa-mem, or bwa-aln.
+
+The BWA index is NOT built here. The workflow builds it once in the
+`bwa_index_human_ref` Snakemake rule, shared by the merge/concat/se filter rules,
+so that a large reference is never re-indexed per sample and concurrent jobs
+cannot race to build it. This script verifies the index exists and exits if not.
+
+Key properties:
 - Incremental CSV writing (no result accumulation in memory)
 - Live logging with flush to ensure real-time output
 - Memory-efficient processing
 - Optional output of removed sequences (mapped to human)
+- Filtered output preserves the original alignment gap columns, one unbroken
+  sequence line per record (see write_fasta_unwrapped)
 """
 
 import os
@@ -59,42 +68,39 @@ def check_aligner(aligner):
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
-def build_bwa_index(reference_fasta: str) -> bool:
+BWA_INDEX_EXTENSIONS = ['.amb', '.ann', '.bwt', '.pac', '.sa']
+
+
+def check_bwa_index(index_prefix: str) -> bool:
     """
-    Build BWA index for reference genome if it doesn't exist
-    
+    Verify a BWA index exists for the given prefix.
+
+    `index_prefix` is whatever was passed to `bwa index -p`, which for a plain
+    `bwa index ref.fasta` is the FASTA path itself. bwa reads only the five index
+    files, so the prefix need not name an existing file.
+
+    Indexing is deliberately not performed here: the workflow's
+    `bwa_index_human_ref` rule builds it once and all three fasta_cleaner modes
+    consume it. Building on demand from inside this script would re-index per
+    invocation and would let concurrent filter jobs race to write the same files.
+
     Returns:
-        True if index exists or was built successfully, False otherwise
+        True if all five index files are present, False otherwise (after
+        reporting exactly which are missing).
     """
-    # Check if index files already exist
-    index_extensions = ['.amb', '.ann', '.bwt', '.pac', '.sa']
-    index_exists = all(os.path.exists(reference_fasta + ext) for ext in index_extensions)
-    
-    if index_exists:
+    missing = [ext for ext in BWA_INDEX_EXTENSIONS
+               if not os.path.exists(index_prefix + ext)]
+
+    if not missing:
         return True
-    
-    print(f"Building BWA index for {reference_fasta}...", flush=True)
-    try:
-        result = subprocess.run(
-            ['bwa', 'index', reference_fasta],
-            capture_output=True,
-            text=True,
-            timeout=600  # 10 minute timeout for indexing
-        )
-        
-        if result.returncode != 0:
-            print(f"Error building BWA index: {result.stderr}", file=sys.stderr, flush=True)
-            return False
-        
-        print(f"BWA index built successfully", flush=True)
-        return True
-        
-    except subprocess.TimeoutExpired:
-        print(f"Error: BWA indexing timed out", file=sys.stderr, flush=True)
-        return False
-    except Exception as e:
-        print(f"Error building BWA index: {str(e)}", file=sys.stderr, flush=True)
-        return False
+
+    print(f"ERROR: BWA index not found for prefix {index_prefix}", file=sys.stderr, flush=True)
+    for ext in missing:
+        print(f"       missing: {index_prefix}{ext}", file=sys.stderr, flush=True)
+    print(f"       build it with: bwa index -p {index_prefix} <reference.fasta>",
+          file=sys.stderr, flush=True)
+    return False
+
 
 def find_fastq_files(input_dir: str) -> List[str]:
     """
@@ -136,6 +142,58 @@ def open_fastq(file_path: str, mode: str = 'rt'):
         return gzip.open(file_path, mode)
     else:
         return open(file_path, mode)
+
+# ---------------------------------------------------------------------------
+# Metrics CSV contract with 06_aggregate_filter_metrics.py
+#
+# parse_human_metrics() there reads ONLY rows whose sequence_id equals
+# FILE_SUMMARY, and keys each sample off the base_name column. Reordering these
+# columns, dropping base_name, or omitting the sentinel makes the aggregator find
+# nothing - and because its parse is wrapped in a bare try/except it fails
+# silently, reporting removed_human = 0 for every sample. That is precisely the
+# bug this script replaced, so treat the two constants below as a fixed API.
+# ---------------------------------------------------------------------------
+METRICS_COLUMNS = [
+    'file_path', 'base_name', 'sequence_id', 'removal_reason', 'mapped_to_human',
+    'step_name', 'input_count', 'kept_count', 'removed_count',
+]
+FILE_SUMMARY = 'FILE_SUMMARY'
+STEP_NAME = 'human_mitogenome_filter'
+
+
+def build_summary_row(result: Dict) -> List:
+    """Render one per-file result as a METRICS_COLUMNS-ordered CSV row."""
+    return [
+        result.get('file_path', ''),
+        result.get('base_name', ''),
+        FILE_SUMMARY,
+        result.get('reason', ''),
+        result.get('mapped_count', 0),
+        STEP_NAME,
+        result.get('input_count', 0),
+        result.get('kept_count', 0),
+        result.get('removed_count', 0),
+    ]
+
+
+def write_fasta_unwrapped(records: List[SeqRecord], path: str) -> None:
+    """
+    Write FASTA with one unbroken sequence line per record, matching the layout
+    of MitoGeneExtractor alignment files.
+
+    SeqIO.write(..., "fasta") hard-wraps at 60 characters, which reflows a 1587
+    column alignment row across 27 lines (26 x 60 + 27). Downstream steps that
+    read these files line-by-line, and any manual inspection of gap columns,
+    expect one line per record.
+
+    record.description holds the full original header text (Biopython stores the
+    whole line after '>' there, ID included), so writing it reproduces the input
+    header verbatim - including characters such as ':' and '+' in read names.
+    """
+    with open(path, 'w') as handle:
+        for record in records:
+            header = record.description if record.description else record.id
+            handle.write(f">{header}\n{str(record.seq)}\n")
 
 def degap_sequences(records: List[SeqRecord]) -> List[SeqRecord]:
     """Remove gap characters from sequences"""
@@ -451,19 +509,18 @@ def process_fasta_file(file_path: str, reference_genome: str, output_dir: str,
             
             removed_count = len(removed_records)
             
-            # Write filtered sequences (with original gaps/alignment)
+            # Write filtered sequences (with original gaps/alignment), one
+            # unbroken sequence line per record to match the input layout.
             output_file = None
             if kept_records:
                 output_file = os.path.join(output_dir, f"{base_name}_human_filtered.fasta")
-                with open(output_file, 'w') as handle:
-                    SeqIO.write(kept_records, handle, "fasta")
-            
-            # Write removed sequences if requested
+                write_fasta_unwrapped(kept_records, output_file)
+
+            # Write removed sequences if requested, same unwrapped layout
             removed_file = None
             if save_removed and removed_records and removed_dir:
                 removed_file = os.path.join(removed_dir, f"{base_name}_removed.fasta")
-                with open(removed_file, 'w') as handle:
-                    SeqIO.write(removed_records, handle, "fasta")
+                write_fasta_unwrapped(removed_records, removed_file)
             
             return {
                 'file_path': file_path,
@@ -684,8 +741,10 @@ Requirements:
     input_group.add_argument('--input-reads', 
                             help='Directory containing FASTQ read files (*_concat_trimmed.fastq[.gz] or *_merged.fastq[.gz])')
     
-    parser.add_argument('--human-genome', required=True, 
-                       help='FASTA file containing human mitochondrial/nuclear genome sequences')
+    parser.add_argument('--human-genome', required=True,
+                       help='Human reference: a FASTA file for minimap2, or a BWA '
+                            'index prefix for bwa-aln/bwa-mem (the prefix given to '
+                            '`bwa index -p`; the FASTA itself is not read)')
     parser.add_argument('--output-dir', required=True, 
                        help='Output directory for filtered files')
     parser.add_argument('--filtered-files-list', required=True, 
@@ -713,16 +772,22 @@ Requirements:
             print("Please install bwa: https://github.com/lh3/bwa", file=sys.stderr, flush=True)
         sys.exit(1)
     
-    # Check if human genome file exists
-    if not os.path.exists(args.human_genome):
+    # Validate the reference.
+    #
+    # For bwa, --human-genome is an index PREFIX rather than a file: bwa aln,
+    # samse and mem read only the .amb/.ann/.bwt/.pac/.sa files and never reopen
+    # the FASTA, so the prefix need not exist on disk. That is what lets the
+    # workflow index once into a writable directory with `bwa index -p` while the
+    # packaged reference FASTA stays read-only (site-packages under a pip install).
+    # The index itself is built by the bwa_index_human_ref rule, never here.
+    #
+    # minimap2 has no separate index step in this script and does need the FASTA.
+    if args.aligner in ['bwa-mem', 'bwa-aln']:
+        if not check_bwa_index(args.human_genome):
+            sys.exit(1)
+    elif not os.path.exists(args.human_genome):
         print(f"ERROR: Human genome file not found: {args.human_genome}", file=sys.stderr, flush=True)
         sys.exit(1)
-    
-    # Build BWA index if using BWA and index doesn't exist
-    if args.aligner in ['bwa-mem', 'bwa-aln']:
-        if not build_bwa_index(args.human_genome):
-            print(f"ERROR: Failed to build BWA index for {args.human_genome}", file=sys.stderr, flush=True)
-            sys.exit(1)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -784,8 +849,7 @@ Requirements:
     # Open CSV file for incremental writing (summary rows only)
     csv_file = open(args.metrics_csv, 'w', newline='')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['file_path', 'sequence_id', 'removal_reason', 
-                        'mapped_to_human', 'step_name', 'input_count', 'kept_count', 'removed_count'])
+    csv_writer.writerow(METRICS_COLUMNS)
     csv_file.flush()
     
     # Open filtered files list for incremental writing
@@ -823,16 +887,7 @@ Requirements:
                 result = future.result()
                 
                 # Write summary row to CSV (no individual read rows)
-                csv_writer.writerow([
-                    result['file_path'],
-                    result['base_name'],
-                    result['reason'],
-                    result.get('mapped_count', 0),
-                    'human_mitogenome_filter',
-                    result['input_count'],
-                    result['kept_count'],
-                    result['removed_count']
-                ])
+                csv_writer.writerow(build_summary_row(result))
                 
                 csv_file.flush()  # Force write to disk
                 
@@ -878,14 +933,11 @@ Requirements:
                 
                 # Write error to CSV
                 base_name = os.path.basename(file_path)
-                csv_writer.writerow([
-                    file_path,
-                    base_name,
-                    f'executor_error: {str(e)}',
-                    0,
-                    'human_mitogenome_filter',
-                    0, 0, 0
-                ])
+                csv_writer.writerow(build_summary_row({
+                    'file_path': file_path,
+                    'base_name': base_name,
+                    'reason': f'executor_error: {str(e)}',
+                }))
                 csv_file.flush()
     
     # Close files

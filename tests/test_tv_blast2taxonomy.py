@@ -120,39 +120,244 @@ class TestFindExpectedTaxonomy:
         assert value == ""
 
 
+class TestAllowedRanksFor:
+    def test_family_floor_excludes_order(self):
+        assert tv_blast2tax.allowed_ranks_for("family") == ["species", "genus", "family"]
+
+    def test_order_floor_allows_everything(self):
+        assert tv_blast2tax.allowed_ranks_for("order") == ["species", "genus", "family", "order"]
+
+    def test_species_floor_allows_species_only(self):
+        assert tv_blast2tax.allowed_ranks_for("species") == ["species"]
+
+    def test_unrecognised_floor_allows_nothing(self):
+        assert tv_blast2tax.allowed_ranks_for("kingdom") == []
+
+    def test_empty_floor_allows_nothing(self):
+        assert tv_blast2tax.allowed_ranks_for("") == []
+
+
+class TestNormaliseTaxon:
+    def test_case_folded(self):
+        assert tv_blast2tax.normalise_taxon("Sciuridae") == tv_blast2tax.normalise_taxon("sciuridae")
+
+    def test_upper_case_folded(self):
+        assert tv_blast2tax.normalise_taxon("SCIURIDAE") == tv_blast2tax.normalise_taxon("Sciuridae")
+
+    def test_internal_whitespace_collapsed(self):
+        assert (tv_blast2tax.normalise_taxon("Sciurus  vulgaris")
+                == tv_blast2tax.normalise_taxon("Sciurus vulgaris"))
+
+    def test_surrounding_whitespace_stripped(self):
+        assert tv_blast2tax.normalise_taxon("  Sciuridae\t") == tv_blast2tax.normalise_taxon("Sciuridae")
+
+    def test_distinct_names_stay_distinct(self):
+        assert tv_blast2tax.normalise_taxon("Sciuridae") != tv_blast2tax.normalise_taxon("Cricetidae")
+
+    def test_empty_string(self):
+        assert tv_blast2tax.normalise_taxon("") == ""
+
+
 class TestCheckHitMatchesLineage:
     def _lineage(self):
         return {"order": "Hymenoptera", "family": "Apidae", "genus": "Apis", "species": "Apis mellifera"}
 
+    def _family_floor(self):
+        return tv_blast2tax.allowed_ranks_for("family")
+
     def test_species_match(self):
         hit = {"species": "Apis mellifera", "genus": "Apis", "family": "Apidae", "order": "Hymenoptera"}
-        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage())
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), self._family_floor())
         assert tax == "Apis mellifera"
         assert rank == "species"
 
     def test_genus_match_when_species_differs(self):
         hit = {"species": "Apis cerana", "genus": "Apis", "family": "Apidae", "order": "Hymenoptera"}
-        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage())
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), self._family_floor())
         assert rank == "genus"
 
     def test_no_match_returns_none(self):
         hit = {"species": "Bombus terrestris", "genus": "Bombus", "family": "Apidae", "order": "Hymenoptera"}
         # family and order match but genus and species don't — function checks most-specific first
         # family IS in lineage, so it will match at family level
-        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage())
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), self._family_floor())
         # family "Apidae" matches
         assert rank == "family"
 
     def test_completely_different_returns_none(self):
         hit = {"species": "Drosophila melanogaster", "genus": "Drosophila",
                "family": "Drosophilidae", "order": "Diptera"}
-        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage())
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), self._family_floor())
         assert tax is None
         assert rank is None
 
     def test_empty_hit_returns_none(self):
-        tax, rank = tv_blast2tax.check_hit_matches_lineage({}, self._lineage())
+        tax, rank = tv_blast2tax.check_hit_matches_lineage({}, self._lineage(), self._family_floor())
         assert tax is None
+
+    def test_order_only_hit_rejected_under_family_floor(self):
+        # Shares the expected order but a different family: the UK016-H10 case
+        hit = {"species": "Vespa crabro", "genus": "Vespa", "family": "Vespidae", "order": "Hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), self._family_floor())
+        assert tax is None
+        assert rank is None
+
+    def test_order_only_hit_accepted_under_order_floor(self):
+        # Same hit passes when the sample's expected taxonomy only reaches order
+        hit = {"species": "Vespa crabro", "genus": "Vespa", "family": "Vespidae", "order": "Hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(
+            hit, self._lineage(), tv_blast2tax.allowed_ranks_for("order"))
+        assert tax == "Hymenoptera"
+        assert rank == "order"
+
+    def test_family_hit_rejected_under_genus_floor(self):
+        hit = {"species": "Bombus terrestris", "genus": "Bombus", "family": "Apidae", "order": "Hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(
+            hit, self._lineage(), tv_blast2tax.allowed_ranks_for("genus"))
+        assert tax is None
+
+    def test_no_permitted_ranks_never_matches(self):
+        hit = {"species": "Apis mellifera", "genus": "Apis", "family": "Apidae", "order": "Hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, self._lineage(), [])
+        assert tax is None
+        assert rank is None
+
+    def test_lowercase_expected_matches_capitalised_hit(self):
+        # The AH29 case: an expected-taxonomy CSV written in lowercase against BOLD's own casing
+        hit = {"species": "Sciurus vulgaris", "genus": "Sciurus",
+               "family": "Sciuridae", "order": "Rodentia"}
+        lineage = {"species": "sciurus vulgaris", "genus": "sciurus",
+                   "family": "sciuridae", "order": "rodentia"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, lineage, self._family_floor())
+        assert rank == "species"
+        # The database's casing is reported, not the expected file's
+        assert tax == "Sciurus vulgaris"
+
+    def test_uppercase_expected_matches_capitalised_hit(self):
+        hit = {"species": "Apis mellifera", "genus": "Apis", "family": "Apidae", "order": "Hymenoptera"}
+        lineage = {"species": "APIS MELLIFERA", "genus": "APIS",
+                   "family": "APIDAE", "order": "HYMENOPTERA"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, lineage, self._family_floor())
+        assert tax == "Apis mellifera"
+        assert rank == "species"
+
+    def test_internal_whitespace_difference_still_matches(self):
+        hit = {"species": "Sciurus  vulgaris", "genus": "Sciurus", "family": "Sciuridae"}
+        lineage = {"species": "Sciurus vulgaris", "genus": "Sciurus", "family": "Sciuridae"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, lineage, self._family_floor())
+        assert rank == "species"
+
+    def test_case_folding_does_not_match_different_taxa(self):
+        # Folding case must not turn an unrelated hit into a match at any rank
+        hit = {"species": "Drosophila melanogaster", "genus": "Drosophila",
+               "family": "Drosophilidae", "order": "Diptera"}
+        lineage = {"species": "apis mellifera", "genus": "apis",
+                   "family": "apidae", "order": "hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(
+            hit, lineage, tv_blast2tax.allowed_ranks_for("order"))
+        assert tax is None
+        assert rank is None
+
+    def test_case_folding_does_not_bypass_the_floor(self):
+        # Mis-cased input still obeys the validation floor: order-only match stays rejected
+        hit = {"species": "Vespa crabro", "genus": "Vespa",
+               "family": "Vespidae", "order": "Hymenoptera"}
+        lineage = {"species": "apis mellifera", "genus": "apis",
+                   "family": "apidae", "order": "hymenoptera"}
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(hit, lineage, self._family_floor())
+        assert tax is None
+        # ...and is accepted once the floor is lowered to order
+        tax, rank = tv_blast2tax.check_hit_matches_lineage(
+            hit, lineage, tv_blast2tax.allowed_ranks_for("order"))
+        assert tax == "Hymenoptera"
+        assert rank == "order"
+
+
+class TestFindFirstMatchingHit:
+    """Reproduces the UK016-H10 case: expected Megaselia (Phoridae, Diptera), where the only hit
+    sharing anything with the expected lineage does so at order rank, and is the worst-scoring
+    survivor of the quality filters."""
+
+    def _hit(self, hit_id, pident, length, hit_num, mismatch=0, gaps=0, evalue=1e-90):
+        return {"hit_id": hit_id, "pident": pident, "length": length, "mismatch": mismatch,
+                "gaps": gaps, "evalue": evalue, "description": "", "hit_num": hit_num}
+
+    def _hits(self):
+        # Percent-identity descending, as tv_local_blast.py writes them
+        return [
+            self._hit("CAB095-06|BOLD:AAA0001", 100.0, 87, 1),
+            self._hit("BGEPL1486-24|BOLD:AHE9669", 100.0, 234, 3),
+            self._hit("BGLIB1267-24|BOLD:AGX0155", 90.698, 258, 10, mismatch=24),
+        ]
+
+    def _taxonomy_data(self):
+        return {
+            "BOLD:AAA0001": {"species": "Homo sapiens", "genus": "Homo",
+                             "family": "Hominidae", "order": "Primates"},
+            "BOLD:AHE9669": {"species": "Lithobius burzenlandicus", "genus": "Lithobius",
+                             "family": "Lithobiidae", "order": "Lithobiomorpha"},
+            "BOLD:AGX0155": {"species": "Beris geniculata", "genus": "Beris",
+                             "family": "Stratiomyidae", "order": "Diptera"},
+        }
+
+    def _lineage(self):
+        return {"order": "Diptera", "family": "Phoridae",
+                "genus": "Megaselia", "species": "Megaselia pumila"}
+
+    def test_order_only_match_rejected_under_family_floor(self):
+        result = tv_blast2tax.find_first_matching_hit(
+            self._hits(), self._taxonomy_data(), self._lineage(),
+            tv_blast2tax.allowed_ranks_for("family"), 80.0, 100, _logger)
+        assert result is None
+
+    def test_order_only_match_accepted_under_order_floor(self):
+        result = tv_blast2tax.find_first_matching_hit(
+            self._hits(), self._taxonomy_data(), self._lineage(),
+            tv_blast2tax.allowed_ranks_for("order"), 80.0, 100, _logger)
+        assert result["hit_id"] == "BGLIB1267-24|BOLD:AGX0155"
+        assert result["matched_rank"] == "order"
+        assert result["taxonomy_match"] == "Diptera"
+
+    def test_family_match_still_accepted_under_family_floor(self):
+        hits = self._hits() + [self._hit("BGEXX0001-24|BOLD:AAA9999", 88.0, 300, 11)]
+        taxonomy_data = dict(self._taxonomy_data())
+        taxonomy_data["BOLD:AAA9999"] = {"species": "Megaselia rufipes", "genus": "Megaselia",
+                                         "family": "Phoridae", "order": "Diptera"}
+        result = tv_blast2tax.find_first_matching_hit(
+            hits, taxonomy_data, self._lineage(),
+            tv_blast2tax.allowed_ranks_for("family"), 80.0, 100, _logger)
+        assert result["hit_id"] == "BGEXX0001-24|BOLD:AAA9999"
+        assert result["matched_rank"] == "genus"
+
+    def test_no_permitted_ranks_returns_none(self):
+        # A sample with no expected taxonomy at any rank cannot be validated
+        result = tv_blast2tax.find_first_matching_hit(
+            self._hits(), self._taxonomy_data(), self._lineage(), [], 80.0, 100, _logger)
+        assert result is None
+
+    def test_quality_filters_still_applied(self):
+        # The 87bp human hit is dropped on length before taxonomy is consulted
+        result = tv_blast2tax.find_first_matching_hit(
+            self._hits(), self._taxonomy_data(),
+            {"order": "Primates", "family": "Hominidae", "genus": "Homo", "species": "Homo sapiens"},
+            tv_blast2tax.allowed_ranks_for("family"), 80.0, 100, _logger)
+        assert result is None
+
+    def test_lowercase_expected_taxonomy_still_matches(self):
+        # The AH29 case end to end: a good BOLD hit that previously failed on casing alone
+        hits = self._hits() + [self._hit("CICA005-22|BOLD:AAE9374", 99.695, 656, 11, mismatch=2)]
+        taxonomy_data = dict(self._taxonomy_data())
+        taxonomy_data["BOLD:AAE9374"] = {"species": "Sciurus vulgaris", "genus": "Sciurus",
+                                         "family": "Sciuridae", "order": "Rodentia"}
+        lineage = {"species": "sciurus vulgaris", "genus": "sciurus",
+                   "family": "sciuridae", "order": "rodentia"}
+        result = tv_blast2tax.find_first_matching_hit(
+            hits, taxonomy_data, lineage,
+            tv_blast2tax.allowed_ranks_for("family"), 80.0, 100, _logger)
+        assert result is not None
+        assert result["hit_id"] == "CICA005-22|BOLD:AAE9374"
+        assert result["matched_rank"] == "species"
+        assert result["taxonomy_match"] == "Sciurus vulgaris"
 
 
 class TestSortHitsByQuality:

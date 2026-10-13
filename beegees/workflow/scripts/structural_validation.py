@@ -22,7 +22,11 @@ PROCESS
    - Store sequence state for counting original N's (barcode_ambiguous_bases_original)
    - Replace gap characters (-) with N's to prepare for nhmmer alignment
    - Align N-padded sequences against COI-5P HMM profile using nhmmer
-   - Construct barcode sequences in HMM coordinate space
+   - Keep every significant envelope that does not overlap a better one in either
+     HMM or sequence coordinates (a match split by a coverage hole is reported as
+     several envelopes, and all of them are real data)
+   - Construct barcode sequences in HMM coordinate space, placing each envelope at
+     its own model coordinates so the reading frame survives the span between them
    - Replace HMM coordinate space gaps (-) with N characters
    - Trim leading/trailing Ns while preserving internal Ns
 4. Translation Analysis:
@@ -100,7 +104,6 @@ Rank 1: No ambiguous bases anywhere in sequence
 Rank 2: Contains some ambiguous bases
 Rank 3: Other quality issues
 
-
 INPUTS
 ================
 --output-csv/-o: Path where the analysis results CSV file will be saved
@@ -172,8 +175,8 @@ Selection Flags:
 
 AUTHORS 
 ================
-Created by Dan Parsons & Ben Price @ NHMUK for the BGE consotrium
-Version: 2.4
+Created by Dan Parsons & Ben Price @ NHMUK for the BGE consortium
+Version: 2.5
 License: MIT
 """
 
@@ -371,10 +374,10 @@ def run_nhmmer_on_sequence(sequence, seq_id, hmm_file, threads=1):
             logging.debug(f"=== TABULAR OUTPUT for {seq_id} ===")
             logging.debug(tabular_content)
 
-            # Parse tabular output to get best alignment
-            alignment_result = parse_nhmmer_result(tabular_content, seq_id)
+            # Parse tabular output into the list of envelopes to use
+            alignment_results = parse_nhmmer_result(tabular_content, seq_id)
 
-            return alignment_result
+            return alignment_results
 
     except FileNotFoundError:
         logging.error("nhmmer not found in PATH")
@@ -384,19 +387,94 @@ def run_nhmmer_on_sequence(sequence, seq_id, hmm_file, threads=1):
         return None
 
 
+def _normalised_span(lo, hi):
+    """Return a coordinate pair as (low, high). nhmmer reports minus-strand hits
+    with seq_from > seq_to, which would make a naive overlap test miss them."""
+    return (lo, hi) if lo <= hi else (hi, lo)
+
+
+def envelopes_overlap(first, second):
+    """
+    True if two nhmmer envelopes overlap in EITHER coordinate system.
+
+    Every envelope is reported twice over: where it sits in the HMM (profile
+    columns) and where it sits in the query sequence. Two envelopes can be
+    disjoint in one and overlapping in the other, and both cases are unsafe:
+
+      - overlapping HMM coordinates: both envelopes would write to the same
+        model columns, and whichever is placed last silently wins.
+      - overlapping sequence coordinates: the same query bases would be placed
+        at two different model positions, duplicating sequence into the barcode.
+
+    Coordinates are 1-based and inclusive, so two ranges touch when
+    `a_from <= b_to and b_from <= a_to`.
+    """
+    a_hmm = _normalised_span(first['hmm_from'], first['hmm_to'])
+    b_hmm = _normalised_span(second['hmm_from'], second['hmm_to'])
+    a_seq = _normalised_span(first['seq_from'], first['seq_to'])
+    b_seq = _normalised_span(second['seq_from'], second['seq_to'])
+
+    hmm_overlap = a_hmm[0] <= b_hmm[1] and b_hmm[0] <= a_hmm[1]
+    seq_overlap = a_seq[0] <= b_seq[1] and b_seq[0] <= a_seq[1]
+
+    if hmm_overlap and seq_overlap:
+        return True, 'HMM and sequence'
+    if hmm_overlap:
+        return True, 'HMM'
+    if seq_overlap:
+        return True, 'sequence'
+    return False, ''
+
+
+def gap_to_span(envelope, span_lo, span_hi):
+    """
+    An envelope extending the barcode leftwards or rightwards drags in every
+    model position between itself and the existing span, and those positions have
+    no data, so they are filled with N's. An envelope sitting INSIDE the span
+    (overlapping nothing, because overlaps are rejected before this point) fills a
+    hole that is already N, so it costs nothing and the gap is 0.
+
+    Coordinates are 1-based inclusive, so abutting ranges give a gap of 0.
+    """
+    if envelope['hmm_to'] < span_lo:
+        return span_lo - envelope['hmm_to'] - 1
+    if envelope['hmm_from'] > span_hi:
+        return envelope['hmm_from'] - span_hi - 1
+    return 0
+
+
 def parse_nhmmer_result(tabular_content, seq_id):
-    best_result = None
-    best_evalue = float('inf')
-    
+    """
+    Return every significant, mutually non-overlapping envelope for seq_id.
+
+    nhmmer reports one envelope per contiguous stretch of the query matching the
+    profile, so a consensus with a low-coverage hole in the middle comes back as
+    two envelopes. Selection is greedy, best E-value first. The best-scoring 
+    envelope is always the anchor. A further envelope is merged only when it:
+
+      1. overlaps nothing already accepted, in either coordinate system, and
+      2. spans more model positions than the gap it would open (the "net gain"
+         test) - because that gap has no data and is filled with N.
+
+    Test 2 exists because a barcode is judged on called bases, not on length.
+
+    Returns:
+        A list of envelope dicts sorted by hmm_from, or None when nothing passes
+        the significance threshold. None rather than [] is deliberate:
+        run_nhmmer_on_sequence() hands this straight back to callers that test
+        the result with `is None`.
+    """
+    candidates = []
+
     try:
         # Parse each line of tabular output
         for line in tabular_content.split('\n'):
             line = line.strip()
-            
+
             # Skip comments and empty lines
             if not line or line.startswith('#'):
                 continue
-            
+
             # Split fields
             fields = line.split()
             if len(fields) >= 15:  # Ensure we have all required fields
@@ -409,93 +487,164 @@ def parse_nhmmer_result(tabular_content, seq_id):
                     evalue = float(fields[12])
                     score = float(fields[13])
                     bias = float(fields[14])
-                    
+
                     logging.info(f"Found alignment for {target_name}: HMM {hmm_from}-{hmm_to}, "
                                 f"Seq {seq_from}-{seq_to}, E-value: {evalue}, Score: {score}, Bias: {bias}")
-                    
+
                     # Only include significant matches (should already be filtered by nhmmer --incE)
                     if evalue <= 1e-3 and target_name == seq_id:
-                        # Keep the best (lowest E-value) result
-                        if evalue < best_evalue:
-                            best_evalue = evalue
-                            best_result = {
-                                'target_name': target_name,
-                                'hmm_from': hmm_from,
-                                'hmm_to': hmm_to,
-                                'seq_from': seq_from,
-                                'seq_to': seq_to,
-                                'score': score,
-                                'bias': bias,
-                                'evalue': evalue
-                            }
-                            logging.info(f"New best alignment for {seq_id}: E-value={evalue}, Score={score}")
+                        candidates.append({
+                            'target_name': target_name,
+                            'hmm_from': hmm_from,
+                            'hmm_to': hmm_to,
+                            'seq_from': seq_from,
+                            'seq_to': seq_to,
+                            'score': score,
+                            'bias': bias,
+                            'evalue': evalue
+                        })
                     else:
                         logging.info(f"Rejected alignment for {seq_id}: E-value {evalue} > threshold 1e-3 or name mismatch")
-                
+
                 except (ValueError, IndexError) as e:
                     logging.warning(f"Could not parse tabular line: {line} ({e})")
                     continue
             else:
                 logging.debug(f"Insufficient fields in tabular line: {line} (got {len(fields)}, need 15)")
-        
+
     except Exception as e:
         logging.error(f"Error parsing nhmmer tabular output: {str(e)}")
-    
-    # Log final result summary
-    if best_result:
-        logging.debug(f"=== BEST ALIGNMENT SUMMARY for {seq_id} ===")
-        logging.debug(f"E-value: {best_result['evalue']}")
-        logging.debug(f"Score: {best_result['score']}")
-        logging.debug(f"Bias: {best_result['bias']}")
-        logging.debug(f"HMM coordinates: {best_result['hmm_from']}-{best_result['hmm_to']}")
-        logging.debug(f"Sequence coordinates: {best_result['seq_from']}-{best_result['seq_to']}")
-        logging.debug(f"HMM alignment length: {best_result['hmm_to'] - best_result['hmm_from'] + 1}")
-        logging.debug(f"Sequence alignment length: {best_result['seq_to'] - best_result['seq_from'] + 1}")
-    else:
+
+    if not candidates:
         logging.debug(f"=== NO SIGNIFICANT ALIGNMENT FOUND for {seq_id} ===")
-    
-    return best_result
+        return None
+
+    # Greedy, best E-value first. The first envelope is always the anchor, so this
+    # can never cover less of the model than the previous best-only behaviour.
+    accepted = []
+    span_lo = span_hi = None
+
+    for envelope in sorted(candidates, key=lambda e: e['evalue']):
+        if not accepted:
+            accepted.append(envelope)
+            span_lo, span_hi = envelope['hmm_from'], envelope['hmm_to']
+            logging.info(
+                f"Accepted envelope 1 for {seq_id}: "
+                f"HMM {envelope['hmm_from']}-{envelope['hmm_to']}, "
+                f"Seq {envelope['seq_from']}-{envelope['seq_to']}, "
+                f"E-value={envelope['evalue']} (anchor, best E-value)"
+            )
+            continue
+
+        clash = None
+        for kept in accepted:
+            overlaps, where = envelopes_overlap(envelope, kept)
+            if overlaps:
+                clash = (kept, where)
+                break
+
+        if clash is not None:
+            kept, where = clash
+            logging.info(
+                f"Discarded envelope for {seq_id}: HMM {envelope['hmm_from']}-{envelope['hmm_to']} "
+                f"(E-value={envelope['evalue']}) overlaps accepted envelope "
+                f"HMM {kept['hmm_from']}-{kept['hmm_to']} in {where} coordinates"
+            )
+            continue
+
+        length = envelope['hmm_to'] - envelope['hmm_from'] + 1
+        gap = gap_to_span(envelope, span_lo, span_hi)
+
+        if length > gap:
+            accepted.append(envelope)
+            span_lo = min(span_lo, envelope['hmm_from'])
+            span_hi = max(span_hi, envelope['hmm_to'])
+            logging.info(
+                f"Accepted envelope {len(accepted)} for {seq_id}: "
+                f"HMM {envelope['hmm_from']}-{envelope['hmm_to']}, "
+                f"Seq {envelope['seq_from']}-{envelope['seq_to']}, "
+                f"E-value={envelope['evalue']} "
+                f"(span {length} > gap {gap}, net gain +{length - gap} model positions)"
+            )
+        else:
+            logging.info(
+                f"Discarded envelope for {seq_id}: HMM {envelope['hmm_from']}-{envelope['hmm_to']} "
+                f"(E-value={envelope['evalue']}) spans {length} model positions but would open a "
+                f"gap of {gap} (net loss {gap - length}); merging would add more ambiguity than sequence"
+            )
+
+    accepted.sort(key=lambda e: e['hmm_from'])
+
+    spans = ', '.join(f"{e['hmm_from']}-{e['hmm_to']}" for e in accepted)
+    covered = sum(e['hmm_to'] - e['hmm_from'] + 1 for e in accepted)
+    logging.info(
+        f"Kept {len(accepted)} of {len(candidates)} significant envelope(s) for {seq_id}: "
+        f"HMM {spans} ({covered} model positions)"
+    )
+
+    return accepted
 
 
-def construct_hmm_space_from_alignment(alignment_result, sequence, hmm_length):
+def construct_hmm_space_from_alignment(alignment_results, sequence, hmm_length):
+    """
+    Lay every accepted envelope into one HMM-coordinate array.
+
+    Each envelope is placed at its own model coordinates, so positions between
+    envelopes stay as gaps and are converted to N downstream by
+    replace_gaps_with_n(). Building in model space is what keeps the reading
+    frame intact across those holes: HMM positions are profile columns, so a
+    downstream envelope lands in frame regardless of how wide the gap before it.
+    """
+    # Tolerate a single envelope dict for callers that still pass one.
+    if isinstance(alignment_results, dict):
+        alignment_results = [alignment_results]
+
     # Initialise HMM sequence with gaps
     hmm_sequence = ['-'] * hmm_length
-    
-    logging.debug(f"Constructing HMM space sequence from alignment")
-    
-    # Extract alignment coordinates
-    hmm_start = alignment_result['hmm_from'] - 1  # Convert to 0-based
-    hmm_end = alignment_result['hmm_to']
-    seq_start = alignment_result['seq_from'] - 1  # Convert to 0-based
-    seq_end = alignment_result['seq_to']
-    
-    logging.debug(f"Placing sequence at HMM positions: {alignment_result['hmm_from']}-{alignment_result['hmm_to']} (1-based)")
-    
-    # Extract the aligned portion of the sequence
-    aligned_sequence_portion = sequence[seq_start:seq_end]
-    
-    # Place sequence at HMM coordinates
+
+    logging.debug(f"Constructing HMM space sequence from {len(alignment_results)} envelope(s)")
+
     total_coverage = 0
-    seq_pos = 0
-    for hmm_pos in range(hmm_start, min(hmm_end, hmm_length)):
-        if seq_pos < len(aligned_sequence_portion):
-            hmm_sequence[hmm_pos] = aligned_sequence_portion[seq_pos]
-            total_coverage += 1
-            seq_pos += 1
-    
+
+    for envelope in sorted(alignment_results, key=lambda e: e['hmm_from']):
+        # Extract alignment coordinates
+        hmm_start = envelope['hmm_from'] - 1  # Convert to 0-based
+        hmm_end = envelope['hmm_to']
+        seq_start = envelope['seq_from'] - 1  # Convert to 0-based
+        seq_end = envelope['seq_to']
+
+        logging.debug(f"Placing sequence at HMM positions: {envelope['hmm_from']}-{envelope['hmm_to']} (1-based)")
+
+        # Extract the aligned portion of the sequence
+        aligned_sequence_portion = sequence[seq_start:seq_end]
+
+        # Place sequence at HMM coordinates
+        placed = 0
+        seq_pos = 0
+        for hmm_pos in range(hmm_start, min(hmm_end, hmm_length)):
+            if seq_pos < len(aligned_sequence_portion):
+                hmm_sequence[hmm_pos] = aligned_sequence_portion[seq_pos]
+                placed += 1
+                seq_pos += 1
+
+        total_coverage += placed
+        logging.debug(f"  placed {placed} bases for HMM {envelope['hmm_from']}-{envelope['hmm_to']}")
+
     # Convert to string
     final_sequence = ''.join(hmm_sequence)
-    
+
     # Log coverage statistics
     coverage_percentage = (total_coverage / hmm_length) * 100
-    
-    logging.debug(f"=== HMM SPACE CONSTRUCTION for {alignment_result['target_name']} ===")
+
+    target_name = alignment_results[0]['target_name'] if alignment_results else '?'
+    logging.debug(f"=== HMM SPACE CONSTRUCTION for {target_name} ===")
+    logging.debug(f"Envelopes placed: {len(alignment_results)}")
     logging.debug(f"Total HMM length: {hmm_length} positions")
     logging.debug(f"Covered positions: {total_coverage} ({coverage_percentage:.1f}%)")
     logging.debug(f"Missing positions: {hmm_length - total_coverage} ({100-coverage_percentage:.1f}%)")
     logging.debug(f"Final sequence length: {len(final_sequence)}")
     logging.debug(f"Final sequence preview: {final_sequence[:100]}{'...' if len(final_sequence) > 100 else ''}")
-    
+
     return final_sequence
 
 
@@ -524,11 +673,17 @@ def align_sequence_with_nhmmer(record, hmm_file, hmm_length, threads=1):
     """
     Process sequence by:
     1. Removing tilde characters (preserve gaps)
-    2. Replacing gap characters with N characters
+    2. Replacing gap characters with N characters (= original N's)
     3. Running nhmmer on the single N-padded sequence
-    4. Constructing HMM space sequence from alignment results
+    4. Constructing HMM space sequence from every accepted envelope
     5. Replacing HMM coordinate space gaps with N characters
     6. Trimming leading/trailing Ns while preserving internal Ns
+
+    Step 4 places each non-overlapping envelope at its own model coordinates, so
+    a barcode split across two envelopes is recovered whole. The span between
+    them is left as gaps here and becomes internal N at step 5; step 6 trims
+    only the ends, so those internal N's are preserved and counted against
+    barcode_base_count.
     """
     try:
         # Step 1: Remove tilde characters (preserve gaps - they're biologically meaningful!)
@@ -543,13 +698,13 @@ def align_sequence_with_nhmmer(record, hmm_file, hmm_length, threads=1):
         logging.debug(f"After gap-to-N replacement: {n_padded_seq[:100]}...")
         
         # Step 3: Run nhmmer on the single N-padded sequence
-        nhmmer_result = run_nhmmer_on_sequence(n_padded_seq, record.id, hmm_file, threads)
-        if not nhmmer_result:
+        nhmmer_results = run_nhmmer_on_sequence(n_padded_seq, record.id, hmm_file, threads)
+        if not nhmmer_results:
             logging.warning(f"No significant nhmmer alignment found for sequence {record.id}")
             return None, original_seq_before_nhmmer
-        
-        # Step 4: Construct HMM space sequence using alignment coordinates
-        hmm_sequence = construct_hmm_space_from_alignment(nhmmer_result, n_padded_seq, hmm_length)
+
+        # Step 4: Construct HMM space sequence using every envelope's coordinates
+        hmm_sequence = construct_hmm_space_from_alignment(nhmmer_results, n_padded_seq, hmm_length)
         
         # Step 5: Replace HMM coordinate space gaps with N characters
         hmm_sequence_with_n = replace_gaps_with_n(hmm_sequence)
@@ -1148,9 +1303,6 @@ def annotate_results_without_selection(all_results):
     """
     Annotate all results when selection is disabled.
     Sets all selection flags to 'no'.
-    
-    Parameters:
-        all_results (list): List of all sequence results
     """
     for result in all_results:
         result['best_sequence'] = 'no'
@@ -1161,15 +1313,12 @@ def annotate_results_without_selection(all_results):
 def clean_results_for_csv_output(all_results):
     """
     Remove sequence record objects from results before CSV output.
-    
-    Parameters:
-        all_results (list): List of all sequence results
     """
     for result in all_results:
         # Remove sequence records after FASTA files are written
         result.pop('sequence_record', None)
         result.pop('aligned_barcode_record', None)
-		
+
 def main():
     # Arg parser
     parser = argparse.ArgumentParser(description='Analyse FASTA files and select best COI-5P sequences using nhmmer-based barcode extraction.')
@@ -1247,12 +1396,22 @@ def main():
         # Initialise results list
         all_results = []
         
+        # Base dir for the 'file' column: the common path of the inputs and the output CSV.
+        # In the pipeline this is output_dir, so paths start with 03_barcode_recovery/...
+        base_dir = os.path.commonpath(
+            [os.path.abspath(p) for p in [args.output_csv, *args.input]]
+        )
+        at_fs_root = base_dir == os.path.dirname(base_dir)
+        
         # Analyse each FASTA file
         for file in args.input:
             logging.info(f"Processing file: {file}")
             results = analyse_fasta(file, args.hmm, hmm_length, args.code, args.threads)
+            abs_file = os.path.abspath(file)
+            rel_file = os.path.basename(abs_file) if at_fs_root else os.path.relpath(abs_file, base_dir)
             for seq_id, result in results.items():
                 result['seq_id'] = seq_id
+                result['file'] = rel_file
                 all_results.append(result)
 
         if args.disable_selection:

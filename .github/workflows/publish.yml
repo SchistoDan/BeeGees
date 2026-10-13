@@ -1,0 +1,97 @@
+name: Publish to PyPI
+
+# Publishing a GitHub Release (tag vX.Y.Z) tests, builds and uploads the package
+# to PyPI via Trusted Publishing - no API token is stored in the repository.
+# A manual run (workflow_dispatch) tests and builds but does not upload.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Same unit tests and compile check as ci.yml, run against the released commit.
+  # ---------------------------------------------------------------------------
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  # ---------------------------------------------------------------------------
+  # Build the sdist and wheel, check them, and smoke-test the installed wheel.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and check distributions
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check release tag matches pyproject version
+        if: github.event_name == 'release'
+        run: |
+          pkg_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "pyproject: $pkg_version  tag: $tag_version"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match pyproject.toml version $pkg_version"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install dist/*.whl
+          pkg_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          /tmp/wheeltest/bin/beegees --version | grep -F "$pkg_version"
+          # Packaged workflow, resources and config must be inside the installed package
+          pkg=$(/tmp/wheeltest/bin/python -c "from beegees.utils.configs import get_package_dir; print(get_package_dir())")
+          for f in workflow/Snakefile \
+                   resources/contaminants/human_reference.fasta \
+                   resources/hmm/COI-5P.hmm \
+                   resources/hmm/rbcL.hmm \
+                   config/config.yaml \
+                   config/multiqc_config.yaml \
+                   profiles/slurm/config.yaml; do
+            test -f "$pkg/$f" || { echo "::error::Missing from wheel: $f"; exit 1; }
+          done
+          # `beegees init` must be able to copy the templates out
+          (cd "$(mktemp -d)" && /tmp/wheeltest/bin/beegees init && test -f config/config.yaml && test -d profiles/slurm)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ---------------------------------------------------------------------------
+  # Upload to PyPI. Only on a published release, never on a manual run.
+  # Requires a Trusted Publisher on pypi.org: owner bge-barcoding, repo BeeGees,
+  # workflow publish.yml, environment pypi.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Upload to PyPI
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/beegees/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

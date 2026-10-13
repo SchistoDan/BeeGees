@@ -10,7 +10,9 @@ PROCESS OVERVIEW
 ================
 1. Parses BLAST results (CSV), expected taxonomy mappings, BLAST database taxonomy (TSV), and input sequences
 2. For each sequence: applies quality filters (see below) -> finds first matching hit -> performs taxonomic validation
-3. Uses hierarchical matching strategy (order/family/genus/species only, exact string matching)
+3. Uses hierarchical matching strategy (species/genus/family/order only, whole-name matching that
+   ignores case and internal whitespace),
+   rejecting matches at ranks coarser than the validation floor (see VALIDATION STRATEGY)
 4. Selects first hit with matching taxonomy after quality filtering
 5. Outputs validation results and filtered sequences
 6. Selects best sequence per Process_ID based on match quality metrics
@@ -19,17 +21,17 @@ FILTERING
 ==================
 Applied in sequence to BLAST hits:
 1. Minimum percent identity threshold (--min-pident)
-2. Minimum alignment length threshold (--min-length) 
-3. First hit with taxonomic match is selected (no top-N limit)
+2. Minimum alignment length threshold (--min-length)
+3. First hit with taxonomic match at or below the validation floor is selected (no top-N limit)
 
 SELECTION CRITERIA
 ==================
 Best sequence per Process_ID selected based on (in priority order):
 1. Must have match_taxonomy == "YES"
 2. Lowest matched_rank (species > genus > family > order)
-3. Highest pident
+3. Lowest gaps
 4. Lowest mismatch
-5. Lowest gaps
+5. Highest pident
 6. Lowest evalue
 7. Highest length
 8. Highest s value (from seq_id)
@@ -47,24 +49,36 @@ REQUIRED:
   --output-fasta FILE        # Filtered FASTA with matching sequences only
 
 OPTIONAL:
-  --taxval-rank RANK         # Primary validation rank: order, family, genus, species (default: family)
+  --taxval-rank RANK         # Coarsest rank a match may be accepted at: order, family, genus, species (default: family)
   --min-pident FLOAT         # Minimum percent identity threshold (default: 0.0)
   --min-length INT           # Minimum alignment length threshold (default: 0)
   --log FILE                 # Log file path (optional)
 
 VALIDATION STRATEGY
 ===================
-- Restricts matching to order, family, genus, species ranks only
-- Uses exact string comparison between BLAST hit taxonomy and expected lineage
-- Accepts matches at ANY rank within expected lineage
-- Selects first hit (by BLAST order) that matches after quality filtering
-- Among matching hits, prioritizes by: percent identity → length → mismatches → e-value
+- Restricts matching to species, genus, family, order ranks only
+- Compares whole taxon names between BLAST hit taxonomy and expected lineage, ignoring case and
+  internal whitespace, so a lowercase expected_taxonomy file matches a capitalised database
+- --taxval-rank sets the COARSEST rank at which a match may be accepted (the "validation floor").
+  A hit matching only at a rank coarser than the floor is rejected: with a floor of family, a hit
+  sharing only the expected order is NOT a match.
+- The floor is resolved PER SAMPLE. If the configured rank is absent from that sample's
+  expected_taxonomy, find_expected_taxonomy() traverses up to the coarsest rank that IS present and
+  that becomes the floor, so a sample with no expected family is still validated at order. The
+  resolved floor is reported in the expected_taxonomy_rank column.
+- Selects first hit (by hit order in the input CSV, which tv_local_blast.py writes
+  percent-identity descending) that matches at or below the floor after quality filtering.
+  Note this is the highest-pident matching hit, not necessarily the one matching at the most
+  specific rank.
 
 OUTPUT
 ======
 - CSV: Validation outcomes, matched ranks, hit statistics, obs_taxonomy field, gaps, full lineage, selection status
 - FASTA: Only sequences with successful taxonomic matches
-- obs_taxonomy: Shows top 10 hits with "sseqid: Taxonomy (rank)" format
+- obs_taxonomy: Shows top 10 hits with "sseqid: Taxonomy (rank)" format. This field is DIAGNOSTIC
+  ONLY: it is ordered by hit quality and reports all four ranks regardless of the validation floor,
+  so its first entry is NOT the accepted hit (see top_matching_hit for that) and it may list hits
+  that matched nothing. A repeated accession is a separate HSP, not a duplicate.
 
 AUTHORS
 =======
@@ -80,6 +94,34 @@ import sys
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Ranks matching is restricted to, ordered most specific to least specific. Matching always
+# prefers the most specific rank, so this order is significant.
+RANK_HIERARCHY = ['species', 'genus', 'family', 'order']
+
+def normalise_taxon(value: str) -> str:
+    """
+    Fold a taxon name for comparison: case-insensitive, internal whitespace collapsed.
+
+    Expected taxonomy is user-supplied while database taxonomy follows its own conventions, so
+    'sciuridae', 'Sciuridae' and 'SCIURIDAE' must all match, as must 'Sciurus  vulgaris' and
+    'Sciurus vulgaris'. Only the comparison is folded - expected_taxonomy, obs_taxonomy and
+    matched_rank still report the strings as they appear in their source files.
+    """
+    return ' '.join(value.split()).casefold()
+
+def allowed_ranks_for(floor_rank: str) -> List[str]:
+    """
+    Ranks a match may be accepted at, given the coarsest permitted rank (the validation floor).
+
+    Because RANK_HIERARCHY runs most specific to least specific, the permitted ranks are the prefix
+    ending at the floor: a floor of 'family' allows species, genus and family but not order.
+    Returns an empty list for an unrecognised or empty floor, which means no match is possible.
+    """
+    if floor_rank not in RANK_HIERARCHY:
+        return []
+
+    return RANK_HIERARCHY[:RANK_HIERARCHY.index(floor_rank) + 1]
 
 def setup_logging(log_file: str = None):
     """Set up logging configuration."""
@@ -403,19 +445,22 @@ def get_expected_lineage(expected_exp_taxonomy: Dict[str, str]) -> Dict[str, str
     }
 
 def find_expected_taxonomy(expected_exp_taxonomy: Dict, taxval_rank: str, logger, seq_id: str = None, process_id: str = None) -> Tuple[str, str]:
-    """Find expected taxonomy, traversing up ranks if necessary (restricted to order, family, genus, species only)."""
-    # Define taxonomic hierarchy (from most specific to least specific)
-    rank_hierarchy = ['species', 'genus', 'family', 'order']
-    
+    """
+    Find expected taxonomy, traversing up ranks if necessary (restricted to order, family, genus, species only).
+
+    The rank returned here is also the sample's validation floor: if the configured taxval_rank is
+    absent from this sample's expected taxonomy, the coarsest rank that IS present becomes the floor,
+    so the sample stays validatable rather than failing for want of an expected value.
+    """
     # Find the starting position in the hierarchy
     try:
-        start_idx = rank_hierarchy.index(taxval_rank)
+        start_idx = RANK_HIERARCHY.index(taxval_rank)
     except ValueError:
         logger.error(f"Invalid taxonomic rank: {taxval_rank}")
         return "", ""
-    
+
     # Try to find taxonomy at the specified rank and progressively higher ranks
-    for current_rank in rank_hierarchy[start_idx:]:
+    for current_rank in RANK_HIERARCHY[start_idx:]:
         expected_rank_value = expected_exp_taxonomy.get(current_rank, '').strip()
         
         if expected_rank_value:
@@ -427,38 +472,56 @@ def find_expected_taxonomy(expected_exp_taxonomy: Dict, taxval_rank: str, logger
     logger.warning(f"No expected taxonomy found at any rank for seq_id: {seq_id}, Process ID: {process_id}")
     return "", ""
 
-def check_hit_matches_lineage(hit_taxonomy: Dict[str, str], expected_lineage: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+def check_hit_matches_lineage(hit_taxonomy: Dict[str, str], expected_lineage: Dict[str, str], allowed_ranks: List[str]) -> Tuple[Optional[str], Optional[str]]:
     """
-    Check if a hit's taxonomy matches the expected lineage at any rank.
+    Check if a hit's taxonomy matches the expected lineage at any permitted rank.
     Returns (matched_taxonomy, matched_rank) or (None, None)
-    Uses exact string matching only at order, family, genus, species ranks.
+    Whole-name matching, folded for case and internal whitespace (see normalise_taxon), and only
+    at the ranks in allowed_ranks (see allowed_ranks_for). The observed name is returned with the
+    database's own casing, not the expected file's.
+
+    Ranks coarser than the validation floor are not consulted at all, so a hit sharing only the
+    expected order is not a match when the floor is family.
     """
-    # Define rank hierarchy (most specific to least specific)
-    rank_hierarchy = ['species', 'genus', 'family', 'order']
-    
-    # Check each rank in observed taxonomy against expected lineage
-    for rank in rank_hierarchy:
+    # Check each permitted rank in observed taxonomy against expected lineage, most specific first
+    for rank in allowed_ranks:
         observed_at_rank = hit_taxonomy.get(rank, '').strip()
         expected_at_rank = expected_lineage.get(rank, '').strip()
-        
+
         if observed_at_rank and expected_at_rank:
-            # Exact string match only
-            if observed_at_rank == expected_at_rank:
+            # Whole-name match, ignoring case and internal whitespace differences
+            if normalise_taxon(observed_at_rank) == normalise_taxon(expected_at_rank):
                 return observed_at_rank, rank
     
     return None, None
     
-def find_first_matching_hit(hits: List[Dict], taxonomy_data: Dict[str, Dict], expected_lineage: Dict[str, str], min_pident: float, min_length: int, logger) -> Optional[Dict]:
+def find_first_matching_hit(hits: List[Dict], taxonomy_data: Dict[str, Dict], expected_lineage: Dict[str, str], allowed_ranks: List[str], min_pident: float, min_length: int, logger) -> Optional[Dict]:
     """
-    Find the first hit (by BLAST order) that matches the expected lineage after quality filtering.
+    Find the first hit that matches the expected lineage at a permitted rank after quality filtering.
     Returns the matching hit with taxonomy info added, or None if no matches found.
+
+    Hits are consulted in the order they appear in the input CSV, which tv_local_blast.py writes
+    percent-identity descending - so this is the highest-pident matching hit, which is not
+    necessarily the hit matching at the most specific rank.
+
+    Hits that match only above the validation floor are logged and skipped, so a run that finds no
+    match can be traced to the rank rule rather than looking like an absence of hits.
     """
     identity_filtered_count = 0
     length_filtered_count = 0
-    
-    logger.info(f"Searching through {len(hits)} hits for first taxonomic match")
-    
-    # Iterate through hits in BLAST order
+    rank_filtered_count = 0
+
+    logger.info(f"Searching through {len(hits)} hits for first taxonomic match at or below "
+                f"{allowed_ranks[-1] if allowed_ranks else 'no permitted rank'}")
+
+    if not allowed_ranks:
+        logger.warning("No permitted ranks for this sample - cannot match any hit")
+        return None
+
+    # Ranks excluded by the floor, used only to explain near-misses in the log
+    excluded_ranks = [rank for rank in RANK_HIERARCHY if rank not in allowed_ranks]
+
+    # Iterate through hits in input order (percent-identity descending)
     for hit in hits:
         # Apply identity filter
         if hit['pident'] < min_pident:
@@ -481,10 +544,19 @@ def find_first_matching_hit(hits: List[Dict], taxonomy_data: Dict[str, Dict], ex
             continue
 
         hit_taxonomy = taxonomy_data[feature_id]
-        
-        # Check if this hit matches the expected lineage
-        matched_taxonomy, matched_rank = check_hit_matches_lineage(hit_taxonomy, expected_lineage)
-        
+
+        # Check if this hit matches the expected lineage at a permitted rank
+        matched_taxonomy, matched_rank = check_hit_matches_lineage(hit_taxonomy, expected_lineage, allowed_ranks)
+
+        if not matched_taxonomy and excluded_ranks:
+            # Near-miss diagnostic: did it match at a rank the floor excludes?
+            coarse_taxonomy, coarse_rank = check_hit_matches_lineage(hit_taxonomy, expected_lineage, excluded_ranks)
+            if coarse_taxonomy:
+                rank_filtered_count += 1
+                logger.info(f"Hit {hit['hit_id']} (hit #{hit['hit_num']}) matches {coarse_taxonomy} at "
+                            f"{coarse_rank} rank, which is above the {allowed_ranks[-1]} validation "
+                            f"floor - rejected")
+
         if matched_taxonomy:
             # Found a match! Add taxonomy info and return
             hit_with_taxonomy = hit.copy()
@@ -500,16 +572,22 @@ def find_first_matching_hit(hits: List[Dict], taxonomy_data: Dict[str, Dict], ex
                 logger.info(f"  Filtered {identity_filtered_count} hits below {min_pident}% identity before finding match")
             if length_filtered_count > 0:
                 logger.info(f"  Filtered {length_filtered_count} hits below {min_length}bp length before finding match")
-            
+            if rank_filtered_count > 0:
+                logger.info(f"  Rejected {rank_filtered_count} hits matching only above the "
+                            f"{allowed_ranks[-1]} validation floor before finding match")
+
             return hit_with_taxonomy
-    
+
     # No matching hits found
     logger.info(f"No taxonomic matches found after checking all hits")
     if identity_filtered_count > 0:
         logger.info(f"  Filtered out {identity_filtered_count} hits below {min_pident}% identity threshold")
     if length_filtered_count > 0:
         logger.info(f"  Filtered out {length_filtered_count} hits below {min_length}bp length threshold")
-    
+    if rank_filtered_count > 0:
+        logger.info(f"  Rejected {rank_filtered_count} hits that matched the expected lineage only "
+                    f"above the {allowed_ranks[-1]} validation floor")
+
     return None
 
 def sort_hits_by_quality(hits: List[Dict]) -> List[Dict]:
@@ -528,10 +606,15 @@ def get_top_10_taxonomies(hits: List[Dict], taxonomy_data: Dict[str, Dict], min_
     """
     Extract taxonomies from top 10 hits (after quality filtering and sorting) and format for obs_taxonomy field.
     Format: "sseqid: Taxonomy (rank); sseqid: Taxonomy (rank); ..."
+
+    DIAGNOSTIC ONLY. This deliberately ignores the validation floor and reports all four ranks for
+    every hit, including hits that matched nothing, so a rejected result can still be inspected.
+    Ordering is by hit quality, so the first entry is NOT the accepted hit - top_matching_hit is.
+    A repeated accession is a separate HSP for the same subject, not a duplicate.
     """
-    # Define allowed ranks
-    allowed_ranks = ['species', 'genus', 'family', 'order']
-    
+    # Report every rank matching is restricted to, regardless of this sample's floor
+    allowed_ranks = RANK_HIERARCHY
+
     # Apply quality filters
     filtered_hits = []
     for hit in hits:
@@ -600,7 +683,8 @@ def select_best_sequences(results: List[Dict], logger) -> List[Dict]:
     Adds 'selected' field to each result: 'YES' for best, 'NO' for others.
     
     Selection criteria (in priority order):
-    1. Must have match_taxonomy == "YES" (i.e. correct taxa at order-level or below)
+    1. Must have match_taxonomy == "YES" (i.e. correct taxa at or below that sample's validation
+       floor, which is taxval_rank or the coarsest expected rank available - see allowed_ranks_for)
     2. Lowest matched_rank (species > genus > family > order)
     3. Lowest gaps
     4. Lowest mismatch
@@ -725,7 +809,9 @@ def main():
                        help='Output FASTA file with matching sequences')
     parser.add_argument('--taxval-rank', default='family',
                        choices=['order', 'family', 'genus', 'species'],
-                       help='Taxonomic rank to validate at (default: family)')
+                       help='Coarsest taxonomic rank a match may be accepted at; matches above it '
+                            'are rejected. Relaxed per sample to the coarsest rank present in that '
+                            "sample's expected taxonomy if this rank is absent (default: family)")
     parser.add_argument('--min-pident', type=float, default=0.0,
                        help='Minimum percent identity threshold for hits to be considered (default: 0.0, no filtering)')
     parser.add_argument('--min-length', type=int, default=0,
@@ -742,8 +828,10 @@ def main():
     logger.info(f"Validation rank: {args.taxval_rank}")
     logger.info(f"Minimum percent identity: {args.min_pident}%")
     logger.info(f"Minimum alignment length: {args.min_length}bp")
-    logger.info("Rank restrictions: Only matches at order, family, genus, and species levels allowed")
-    logger.info("Hit selection: First hit with matching taxonomy (by BLAST order) after quality filtering")
+    logger.info(f"Rank restrictions: matches allowed at {', '.join(allowed_ranks_for(args.taxval_rank))} "
+                f"(anything above '{args.taxval_rank}' is rejected), relaxed per sample when the "
+                f"expected taxonomy has no value at that rank")
+    logger.info("Hit selection: First hit with matching taxonomy (highest percent identity) after quality filtering")
     logger.info("obs_taxonomy output: Top 10 hits by quality with sseqid information")
     logger.info("Sequence selection: Best sequence per Process_ID based on quality criteria")
     logger.info(f"Taxonomy database: {args.input_taxonomy_file}")
@@ -778,14 +866,21 @@ def main():
         # Build full taxonomy lineage for output
         full_lineage = build_taxonomy_lineage(exp_taxonomy[process_id])
         
-        # Find expected taxonomy at specified rank (with traversal if needed)
+        # Find expected taxonomy at specified rank (with traversal if needed). The rank returned is
+        # this sample's validation floor: the configured rank, or the coarsest rank actually present
+        # in its expected taxonomy.
         expected_taxonomy, expected_taxonomy_rank = find_expected_taxonomy(
             exp_taxonomy[process_id], args.taxval_rank, logger, seq_id, process_id)
-        
-        # Find first matching hit after quality filtering
+
+        allowed_ranks = allowed_ranks_for(expected_taxonomy_rank)
+        if expected_taxonomy_rank and expected_taxonomy_rank != args.taxval_rank:
+            logger.info(f"Validation floor relaxed to '{expected_taxonomy_rank}' for seq_id: {seq_id} "
+                        f"(no expected taxonomy at '{args.taxval_rank}')")
+
+        # Find first matching hit at or below the floor, after quality filtering
         matching_hit = find_first_matching_hit(
-            hits, taxonomy_data, expected_lineage, args.min_pident, args.min_length, logger)
-        
+            hits, taxonomy_data, expected_lineage, allowed_ranks, args.min_pident, args.min_length, logger)
+
         # Generate obs_taxonomy string from top 10 hits by quality
         obs_taxonomy_str = get_top_10_taxonomies(hits, taxonomy_data, args.min_pident, args.min_length, logger)
         

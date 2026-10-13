@@ -7,6 +7,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:              # Reused by publish.yml so the released commit is tested
 
 concurrency:
   # Cancel superseded runs on the same ref to save Actions minutes.
